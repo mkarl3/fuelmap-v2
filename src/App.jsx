@@ -71,11 +71,11 @@ const TIRE_MULTIPLIERS = [
 ];
 
 const DEFAULT_BIKE = {
-  id: 1, name: "Gravel Bike",
-  weight: 9.5,
-  positionId: "gravel_race",
+  id: 1, name: "2021 Trek Emonda",
+  weight: 7.7,
+  positionId: "road_race",
   drivetrainId: "road_wax",
-  tireId: "gravel_40_50",
+  tireId: "road_28_32",
 };
 
 // Compute weighted-average Crr from surface mix array [{id, pct}], modified by tire multiplier
@@ -1150,8 +1150,8 @@ function computeCP(cpTests) {
 }
 
 const DEFAULT_ATHLETE = {
-  id: 1, name: "You", ftp: 289, weight: 86.2,
-  maxHR: 185,
+  id: 1, name: "Athlete 1", ftp: 250, weight: 79.4,
+  maxHR: 175,
   wPrime: 20000,
   phenotype: "allrounder",
   cpTests: [{ secs: 0, watts: 0 }, { secs: 0, watts: 0 }, { secs: 0, watts: 0 }],
@@ -5184,18 +5184,32 @@ function LibraryTab({ products, setProducts }) {
 }
 
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
+function lsGet(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+  catch { return fallback; }
+}
+
 export default function App() {
   const [tab, setTab] = useState("MODEL");
-  const [imperial, setImperial] = useState(true);
-  const [athletes, setAthletes] = useState([DEFAULT_ATHLETE]);
-  const [activeAthleteId, setActiveAthleteId] = useState(1);
-  const [bikes, setBikes] = useState([DEFAULT_BIKE]);
-  const [activeBikeId, setActiveBikeId] = useState(1);
-  const [products, setProducts] = useState(DEFAULT_PRODUCTS);
+  const [imperial, setImperial] = useState(() => lsGet('fm_imperial', true));
+  const [athletes, setAthletes] = useState(() => lsGet('fm_athletes', [DEFAULT_ATHLETE]));
+  const [activeAthleteId, setActiveAthleteId] = useState(() => lsGet('fm_activeAthleteId', 1));
+  const [bikes, setBikes] = useState(() => lsGet('fm_bikes', [DEFAULT_BIKE]));
+  const [activeBikeId, setActiveBikeId] = useState(() => lsGet('fm_activeBikeId', 1));
+  const [products, setProducts] = useState(() => lsGet('fm_products', DEFAULT_PRODUCTS));
   const [races, setRaces] = useState([]);
 
   const athlete = athletes.find(a => a.id === activeAthleteId) || athletes[0];
 
+  // Persist profile data to localStorage whenever it changes
+  useEffect(() => { localStorage.setItem('fm_imperial',        JSON.stringify(imperial));        }, [imperial]);
+  useEffect(() => { localStorage.setItem('fm_athletes',        JSON.stringify(athletes));        }, [athletes]);
+  useEffect(() => { localStorage.setItem('fm_activeAthleteId', JSON.stringify(activeAthleteId)); }, [activeAthleteId]);
+  useEffect(() => { localStorage.setItem('fm_bikes',           JSON.stringify(bikes));           }, [bikes]);
+  useEffect(() => { localStorage.setItem('fm_activeBikeId',    JSON.stringify(activeBikeId));    }, [activeBikeId]);
+  useEffect(() => { localStorage.setItem('fm_products',        JSON.stringify(products));        }, [products]);
+
+  // Load races from IndexedDB on mount
   useEffect(() => {
     loadAllRaces().then(setRaces).catch(() => {});
   }, []);
