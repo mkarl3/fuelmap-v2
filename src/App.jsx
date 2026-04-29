@@ -1,5 +1,6 @@
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ComposedChart, ReferenceLine, ReferenceArea } from "recharts";
+import { loadAllRaces, saveRace, updateRace, deleteRace } from './db.js';
 
 // ─── DESIGN TOKENS ────────────────────────────────────────────────────────────
 // Source of truth: FuelMAP Brand & Design System v2
@@ -2290,7 +2291,7 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
 }
 
 // ─── PLAN TAB ─────────────────────────────────────────────────────────────────
-function PlanTab({ athlete, athletes, setActiveAthleteId, products, savedPlans, setSavedPlans, imperial, bikes, setBikes, activeBikeId, setActiveBikeId }) {
+function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, products, races, setRaces, imperial, bikes, setBikes, activeBikeId, setActiveBikeId }) {
   const [gpxFile, setGpxFile] = useState(null);
   const [surfaceMix, setSurfaceMix] = useState([
     { id: "tarmac",   pct: 30  },
@@ -2324,6 +2325,13 @@ function PlanTab({ athlete, athletes, setActiveAthleteId, products, savedPlans, 
   const [intakeEvents, setIntakeEvents] = useState([]);
   const [planName, setPlanName] = useState("Race Plan");
   const [saved, setSaved] = useState(false);
+  const [activeRaceId, setActiveRaceId] = useState(null);
+  const [snapshotAthlete, setSnapshotAthlete] = useState(null);
+  const [snapshotBike, setSnapshotBike] = useState(null);
+
+  // When a race is loaded, physics use the snapshot; otherwise use the current active athlete/bike.
+  const athlete = snapshotAthlete ?? currentAthlete;
+  const currentActiveBike = (bikes || []).find(b => b.id === activeBikeId) || DEFAULT_BIKE;
 
   const effectiveStats = gpxStats || {
     totalDistKm: manualDist,
@@ -2332,7 +2340,7 @@ function PlanTab({ athlete, athletes, setActiveAthleteId, products, savedPlans, 
     segmentGrades: [],
     elevProfile: [],
   };
-  const activeBike = (bikes || []).find(b => b.id === activeBikeId) || DEFAULT_BIKE;
+  const activeBike = snapshotBike ?? currentActiveBike;
   const { CdA, eta, tireMult } = bikePhysics(activeBike);
 
   const handleGPX = (text, name) => {
@@ -2427,13 +2435,109 @@ function PlanTab({ athlete, athletes, setActiveAthleteId, products, savedPlans, 
   const sensDeltaMin = sensAdjDuration - sensBaseDuration;
   const sensAnyActive = sensPower !== 0 || sensWeight !== 0 || sensCdA !== 0 || sensCrr !== 0;
 
-  const savePlan = () => {
-    const plan = {
-      id: Date.now(), name: planName, athleteId: athlete.id,
-      route: effectiveStats, pacingPlan, nutritionPlan: { preRaceMeal, intakeEvents: [...intakeEvents] }
+  const saveOrUpdateRace = async () => {
+    const raceRecord = {
+      name: planName,
+      updatedAt: new Date().toISOString(),
+      status: 'planned',
+      athleteSnapshot: {
+        id: athlete.id, name: athlete.name, ftp: athlete.ftp,
+        weight: athlete.weight, wPrime: deriveWPrime(athlete), phenotype: athlete.phenotype,
+      },
+      bikeSnapshot: {
+        id: activeBike.id, name: activeBike.name, weight: activeBike.weight,
+        positionId: activeBike.positionId, drivetrainId: activeBike.drivetrainId, tireId: activeBike.tireId,
+      },
+      athleteId: currentAthlete.id,
+      bikeId: currentActiveBike.id,
+      plan: {
+        route: gpxStats,
+        gpxFileName: gpxFile,
+        pacingPlan,
+        nutritionPlan: { preRaceMeal, intakeEvents: [...intakeEvents] },
+        conditions: { ...weatherContext },
+        surfaceMix: [...surfaceMix],
+        climbCategories: { ...climbCategories },
+        pacingMode,
+        targetIF,
+        maxPower: maxPower === '' ? null : Number(maxPower),
+        goalTimeMin,
+        segments: [...segments],
+      },
     };
-    setSavedPlans(prev => [...prev.filter(p => p.name !== planName), plan]);
-    setSaved(true);
+    try {
+      if (activeRaceId) {
+        await updateRace(activeRaceId, raceRecord);
+        setRaces(prev => prev.map(r => r.id === activeRaceId ? { ...r, ...raceRecord, id: activeRaceId } : r));
+      } else {
+        raceRecord.createdAt = new Date().toISOString();
+        raceRecord.fit = null;
+        const newId = await saveRace(raceRecord);
+        setRaces(prev => [...prev, { ...raceRecord, id: newId }]);
+        setActiveRaceId(newId);
+      }
+      setSaved(true);
+    } catch (e) {
+      alert('Failed to save race: ' + e.message);
+    }
+  };
+
+  const loadRace = (race) => {
+    setActiveRaceId(race.id);
+    setSnapshotAthlete(race.athleteSnapshot);
+    setSnapshotBike(race.bikeSnapshot ?? null);
+    setGpxStats(race.plan.route ?? null);
+    setGpxFile(race.plan.gpxFileName ?? null);
+    setSurfaceMix(race.plan.surfaceMix ?? [{ id: "tarmac", pct: 30 }, { id: "gravel_2", pct: 60 }, { id: "dirt", pct: 10 }]);
+    setWeatherContext(race.plan.conditions ?? { tempC: null, precipPct: null, windSpeedMs: 0, windDirDeg: 270, windEff: 30 });
+    setPacingMode(race.plan.pacingMode ?? 'constant_if');
+    setTargetIF(race.plan.targetIF ?? 0.76);
+    setMaxPower(race.plan.maxPower != null ? String(race.plan.maxPower) : '');
+    setClimbCategories(race.plan.climbCategories ?? { moderate: { min: 0, max: 0 }, steep: { min: 0, max: 0 }, wall: { min: 0, max: 0 } });
+    setGoalTimeMin(race.plan.goalTimeMin ?? 240);
+    setSegments(race.plan.segments ?? []);
+    setNumSegments(race.plan.segments?.length ?? 3);
+    setPreRaceMeal(race.plan.nutritionPlan?.preRaceMeal ?? 120);
+    setIntakeEvents(race.plan.nutritionPlan?.intakeEvents ?? []);
+    setPlanName(race.name);
+    setPacingPlan(null);
+    setSaved(false);
+  };
+
+  const startNewRace = () => {
+    setActiveRaceId(null);
+    setSnapshotAthlete(null);
+    setSnapshotBike(null);
+    setPlanName('Race Plan');
+    setSaved(false);
+  };
+
+  const updateAthleteProfile = async () => {
+    const snap = {
+      id: currentAthlete.id, name: currentAthlete.name, ftp: currentAthlete.ftp,
+      weight: currentAthlete.weight, wPrime: deriveWPrime(currentAthlete), phenotype: currentAthlete.phenotype,
+    };
+    setSnapshotAthlete(snap);
+    if (activeRaceId) {
+      try {
+        await updateRace(activeRaceId, { athleteSnapshot: snap, athleteId: currentAthlete.id, updatedAt: new Date().toISOString() });
+        setRaces(prev => prev.map(r => r.id === activeRaceId ? { ...r, athleteSnapshot: snap } : r));
+      } catch (e) { alert('Failed to update athlete: ' + e.message); }
+    }
+  };
+
+  const refreshBikeSpecs = async () => {
+    const snap = {
+      id: currentActiveBike.id, name: currentActiveBike.name, weight: currentActiveBike.weight,
+      positionId: currentActiveBike.positionId, drivetrainId: currentActiveBike.drivetrainId, tireId: currentActiveBike.tireId,
+    };
+    setSnapshotBike(snap);
+    if (activeRaceId) {
+      try {
+        await updateRace(activeRaceId, { bikeSnapshot: snap, bikeId: currentActiveBike.id, updatedAt: new Date().toISOString() });
+        setRaces(prev => prev.map(r => r.id === activeRaceId ? { ...r, bikeSnapshot: snap } : r));
+      } catch (e) { alert('Failed to update bike: ' + e.message); }
+    }
   };
 
   // Alerts
@@ -2483,6 +2587,64 @@ function PlanTab({ athlete, athletes, setActiveAthleteId, products, savedPlans, 
 
   return (
     <div>
+      {/* ── RACE selector card ───────────────────────────────────────── */}
+      <div className="card">
+        <div className="card-header">Race</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: (snapshotAthlete) ? 12 : 0 }}>
+          <select
+            value={activeRaceId ?? ""}
+            onChange={e => {
+              const id = Number(e.target.value);
+              const race = races.find(r => r.id === id);
+              if (race) loadRace(race);
+            }}
+            style={{ flex: 1, fontSize: 12 }}
+          >
+            <option value="">— New Race —</option>
+            {races.map(r => (
+              <option key={r.id} value={r.id}>
+                {r.name}{r.status === 'analyzed' ? ' ✓' : ''}
+              </option>
+            ))}
+          </select>
+          {activeRaceId && (
+            <button className="btn-secondary" style={{ fontSize: 11, whiteSpace: "nowrap" }} onClick={startNewRace}>
+              + New
+            </button>
+          )}
+        </div>
+        {snapshotAthlete && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {/* Athlete snapshot row */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", width: 44, flexShrink: 0 }}>Athlete</span>
+              <span style={{ fontSize: 12, flex: 1, color: T.text }}>
+                {snapshotAthlete.name} — {snapshotAthlete.ftp}w
+                {snapshotAthlete.ftp !== currentAthlete.ftp && (
+                  <span style={{ fontSize: 10, color: T.gold, marginLeft: 8 }}>(current: {currentAthlete.ftp}w)</span>
+                )}
+              </span>
+              <button className="btn-secondary" style={{ fontSize: 10, padding: "3px 8px", whiteSpace: "nowrap" }} onClick={updateAthleteProfile}>
+                Update Athlete Profile
+              </button>
+            </div>
+            {/* Bike snapshot row */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", width: 44, flexShrink: 0 }}>Bike</span>
+              <span style={{ fontSize: 12, flex: 1, color: T.text }}>
+                {snapshotBike?.name ?? activeBike.name}
+                {snapshotBike && snapshotBike.name !== currentActiveBike.name && (
+                  <span style={{ fontSize: 10, color: T.gold, marginLeft: 8 }}>(current: {currentActiveBike.name})</span>
+                )}
+              </span>
+              <button className="btn-secondary" style={{ fontSize: 10, padding: "3px 8px", whiteSpace: "nowrap" }} onClick={refreshBikeSpecs}>
+                Refresh Bike Specs
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Step 1 — Route */}
       <div className="card">
         <div className="card-header">01 — Route</div>
@@ -2490,7 +2652,7 @@ function PlanTab({ athlete, athletes, setActiveAthleteId, products, savedPlans, 
         {/* Athlete + Bike selectors */}
         <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
           <label style={{ fontSize: 11, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", whiteSpace: "nowrap", width: 36 }}>Athlete</label>
-          <select value={athlete.id} onChange={e => setActiveAthleteId(Number(e.target.value))} style={{ flex: 1, fontSize: 12 }}>
+          <select value={currentAthlete.id} onChange={e => setActiveAthleteId(Number(e.target.value))} style={{ flex: 1, fontSize: 12 }}>
             {athletes.map(a => <option key={a.id} value={a.id}>{a.name} — {a.ftp}w · {imperial ? Math.round(a.weight * 2.205) : a.weight}{imperial ? "lb" : "kg"}</option>)}
           </select>
         </div>
@@ -3150,12 +3312,12 @@ function PlanTab({ athlete, athletes, setActiveAthleteId, products, savedPlans, 
         <div className="card">
           <div className="card-header">Race Plan</div>
 
-          {/* Save plan */}
+          {/* Save / Update race */}
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-            <input type="text" value={planName} onChange={e => setPlanName(e.target.value)} style={{ flex: 1 }} placeholder="Plan name" />
-            <button className="btn-primary" onClick={savePlan}>Save Plan</button>
+            <input type="text" value={planName} onChange={e => setPlanName(e.target.value)} style={{ flex: 1 }} placeholder="Race name" />
+            <button className="btn-primary" onClick={saveOrUpdateRace}>{activeRaceId ? "Update Race" : "Save Race"}</button>
           </div>
-          {saved && <div style={{ color: T.green, fontSize: 12, marginBottom: 12 }}>✓ Saved to library</div>}
+          {saved && <div style={{ color: T.green, fontSize: 12, marginBottom: 12 }}>✓ Race saved</div>}
 
           {/* Plan Details */}
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
@@ -3221,14 +3383,47 @@ function PlanTab({ athlete, athletes, setActiveAthleteId, products, savedPlans, 
         </div>
       )}
 
-      {/* Saved Plans */}
-      {savedPlans.length > 0 && (
+      {/* Saved Races */}
+      {races.length > 0 && (
         <div className="card">
-          <div className="card-header">Saved Plans</div>
-          {savedPlans.map(p => (
-            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 12px", background: T.surface2, borderRadius: 4, marginBottom: 6 }}>
-              <span style={{ flex: 1, fontSize: 13 }}>{p.name}</span>
-              <span style={{ fontSize: 11, color: T.textMuted }}>{minsToHHMM(p.pacingPlan?.estimatedDurationMin)} · TSS {p.pacingPlan?.tss}</span>
+          <div className="card-header">Saved Races</div>
+          {races.map(r => (
+            <div key={r.id} style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "8px 10px", marginBottom: 6, borderRadius: 4,
+              background: r.id === activeRaceId ? `${T.blue}14` : T.surface2,
+              border: `1px solid ${r.id === activeRaceId ? T.blue : T.border}`,
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
+                  {r.plan?.pacingPlan
+                    ? `${minsToHHMM(r.plan.pacingPlan.correctedDurationMin ?? r.plan.pacingPlan.estimatedDurationMin)} · TSS ${r.plan.pacingPlan.tss} · IF ${r.plan.pacingPlan.ifActual?.toFixed(2)}`
+                    : "No plan computed"}
+                </div>
+              </div>
+              <span style={{
+                fontSize: 9, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.08em",
+                textTransform: "uppercase", padding: "2px 6px", borderRadius: 2, flexShrink: 0,
+                background: r.status === 'analyzed' ? `${T.green}20` : `${T.gold}20`,
+                color: r.status === 'analyzed' ? T.green : T.gold,
+              }}>
+                {r.status === 'analyzed' ? 'Analyzed' : 'Planned'}
+              </span>
+              <button className="btn-secondary" style={{ fontSize: 10, padding: "3px 8px", flexShrink: 0 }} onClick={() => loadRace(r)}>
+                Load
+              </button>
+              <button
+                onClick={async () => {
+                  if (!window.confirm(`Delete "${r.name}"?`)) return;
+                  try {
+                    await deleteRace(r.id);
+                    setRaces(prev => prev.filter(x => x.id !== r.id));
+                    if (activeRaceId === r.id) startNewRace();
+                  } catch (e) { alert('Delete failed: ' + e.message); }
+                }}
+                style={{ background: "none", border: "none", color: T.textDim, fontSize: 18, cursor: "pointer", padding: "0 2px", lineHeight: 1, flexShrink: 0 }}
+              >×</button>
             </div>
           ))}
         </div>
@@ -3238,18 +3433,73 @@ function PlanTab({ athlete, athletes, setActiveAthleteId, products, savedPlans, 
 }
 
 // ─── ANALYZE TAB ──────────────────────────────────────────────────────────────
-function AnalyzeTab({ athlete, products, savedPlans, imperial }) {
-  const [selectedPlanId, setSelectedPlanId] = useState("");
+function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
+  const [selectedRaceId, setSelectedRaceId] = useState("");
   const [fitFile, setFitFile] = useState(null);
   const [fitData, setFitData] = useState(null);
+  const [fitSaved, setFitSaved] = useState(false);
   const [actualIntake, setActualIntake] = useState([]);
   const [fitError, setFitError] = useState(null);
 
-  const selectedPlan = savedPlans.find(p => p.id === Number(selectedPlanId));
+  // When the selected race changes, auto-load stored FIT data if present.
+  useEffect(() => {
+    if (!selectedRaceId) { setFitSaved(false); return; }
+    const race = races.find(r => r.id === Number(selectedRaceId));
+    if (race?.fit) {
+      setFitData(race.fit);
+      setFitFile(race.fit.fileName ?? 'Saved FIT');
+      setFitError(null);
+      setFitSaved(true);
+    } else {
+      setFitData(null);
+      setFitFile(null);
+      setFitSaved(false);
+    }
+  }, [selectedRaceId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Shim: map new race schema onto the old selectedPlan shape so all downstream
+  // references (selectedPlan.pacingPlan, selectedPlan.route, etc.) work unchanged.
+  const selectedRace = races.find(r => r.id === Number(selectedRaceId));
+  const selectedPlan = selectedRace ? {
+    id: selectedRace.id,
+    name: selectedRace.name,
+    pacingPlan:    selectedRace.plan?.pacingPlan    ?? null,
+    route:         selectedRace.plan?.route         ?? null,
+    nutritionPlan: selectedRace.plan?.nutritionPlan ?? null,
+    athleteSnapshot: selectedRace.athleteSnapshot,
+  } : null;
+
+  const saveFitToRace = async () => {
+    if (!fitData || !selectedRaceId) return;
+    const fitRecord = {
+      fileName:          fitFile,
+      savedAt:           new Date().toISOString(),
+      elapsedMin:        fitData.elapsedMin,
+      movingMin:         fitData.movingMin,
+      stoppedMin:        fitData.stoppedMin,
+      rawAvgPower:       fitData.rawAvgPower,
+      rawNP:             fitData.rawNP,
+      totalRecords:      fitData.totalRecords,
+      movingPowerSeries: fitData.movingPowerSeries,
+      movingDistSeries:  fitData.movingDistSeries,
+      movingAltSeries:   fitData.movingAltSeries,
+      movingHRSeries:    fitData.movingHRSeries,
+      blockMap:          fitData.blockMap,
+      firstGPS:          fitData.firstGPS,
+    };
+    try {
+      const id = Number(selectedRaceId);
+      await updateRace(id, { fit: fitRecord, status: 'analyzed', updatedAt: new Date().toISOString() });
+      setRaces(prev => prev.map(r => r.id === id ? { ...r, fit: fitRecord, status: 'analyzed' } : r));
+      setFitSaved(true);
+    } catch (e) {
+      alert('Failed to save FIT data: ' + e.message);
+    }
+  };
 
   const handleFIT = (buffer, name) => {
     const result = parseFIT(buffer);
-    if (result) { setFitData(result); setFitFile(name); setFitError(null); }
+    if (result) { setFitData(result); setFitFile(name); setFitError(null); setFitSaved(false); }
     else setFitError("Could not parse FIT file. If you're using a Wahoo Bolt V1 or older device, power data may not be written to record messages — try exporting from TrainingPeaks or use a Garmin device. Other formats: ensure the file is a valid .fit activity file, not a course or workout file.");
   };
 
@@ -3376,10 +3626,14 @@ function AnalyzeTab({ athlete, products, savedPlans, imperial }) {
       <div className="card">
         <div className="card-header">Load Data</div>
         <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Compare Against Plan</label>
-          <select value={selectedPlanId} onChange={e => setSelectedPlanId(e.target.value)} style={{ width: "100%" }}>
-            <option value="">— Standalone (no plan) —</option>
-            {savedPlans.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Race</label>
+          <select value={selectedRaceId} onChange={e => setSelectedRaceId(e.target.value)} style={{ width: "100%" }}>
+            <option value="">— Standalone (no race selected) —</option>
+            {races.map(r => (
+              <option key={r.id} value={r.id}>
+                {r.name}{r.status === 'analyzed' ? ' ✓' : ''}
+              </option>
+            ))}
           </select>
         </div>
         <DropZone accept=".fit" label="Drop .fit file or click to upload" onFile={handleFIT} loaded={fitFile} />
@@ -3387,6 +3641,14 @@ function AnalyzeTab({ athlete, products, savedPlans, imperial }) {
         {fitData && (
           <div style={{ marginTop: 10, fontSize: 12, color: T.textMuted }}>
             {fitData.totalRecords.toLocaleString()} records · Moving: {minsToHHMM(fitData.movingMin)} · Elapsed: {minsToHHMM(fitData.elapsedMin)}
+          </div>
+        )}
+        {fitData && selectedRaceId && (
+          <div style={{ marginTop: 10 }}>
+            {fitSaved
+              ? <div style={{ fontSize: 12, color: T.green }}>✓ FIT data saved to race</div>
+              : <button className="btn-primary" onClick={saveFitToRace} style={{ fontSize: 12 }}>Update Race with FIT Data</button>
+            }
           </div>
         )}
       </div>
@@ -4930,9 +5192,13 @@ export default function App() {
   const [bikes, setBikes] = useState([DEFAULT_BIKE]);
   const [activeBikeId, setActiveBikeId] = useState(1);
   const [products, setProducts] = useState(DEFAULT_PRODUCTS);
-  const [savedPlans, setSavedPlans] = useState([]);
+  const [races, setRaces] = useState([]);
 
   const athlete = athletes.find(a => a.id === activeAthleteId) || athletes[0];
+
+  useEffect(() => {
+    loadAllRaces().then(setRaces).catch(() => {});
+  }, []);
 
   return (
     <>
@@ -4970,8 +5236,8 @@ export default function App() {
 
         {/* Content */}
         <div style={{ maxWidth: 800, margin: "0 auto", padding: "20px 16px" }}>
-          {tab === "MODEL"   && <PlanTab athlete={athlete} athletes={athletes} setActiveAthleteId={setActiveAthleteId} products={products} savedPlans={savedPlans} setSavedPlans={setSavedPlans} imperial={imperial} bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />}
-          {tab === "ANALYZE" && <AnalyzeTab athlete={athlete} products={products} savedPlans={savedPlans} imperial={imperial} bikes={bikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />}
+          {tab === "MODEL"   && <PlanTab athlete={athlete} athletes={athletes} setActiveAthleteId={setActiveAthleteId} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />}
+          {tab === "ANALYZE" && <AnalyzeTab athlete={athlete} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />}
           {tab === "PERFORM" && (
             <div style={{ padding: "40px 20px", textAlign: "center" }}>
               <div style={{ fontSize: 28, fontFamily: "Barlow Condensed", fontWeight: 700, color: T.textMuted, letterSpacing: "0.1em", marginBottom: 12 }}>PERFORM</div>
