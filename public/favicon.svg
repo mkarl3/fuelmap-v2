@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="6" fill="#0D0D0F"/>
+  <!-- F mark in FuelMAP red -->
+  <rect x="8" y="7" width="12" height="3" rx="1" fill="#FF3347"/>
+  <rect x="8" y="13" width="9" height="3" rx="1" fill="#FF3347"/>
+  <rect x="8" y="7" width="3" height="18" rx="1" fill="#FF3347"/>
+  <!-- Signal cyan accent dot -->
+  <circle cx="23" cy="23" r="3" fill="#00D4FF"/>
+</svg>
