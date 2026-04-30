@@ -1581,9 +1581,9 @@ function ElevPowerChart({ displayStream, gpxStats, ftp, imperial = false, detect
 
   const eleUnit = imperial ? "ft" : "m";
   const eles = data.map(d => d.ele).filter(e => e > 0);
-  const padding = imperial ? 260 : 80;
-  const maxEle = eles.length ? Math.max(...eles) + padding : (imperial ? 1640 : 500);
-  const minEle = eles.length ? Math.max(0, Math.min(...eles) - padding) : 0;
+  const roundTo = imperial ? 50 : 10;
+  const minEle = eles.length ? Math.floor(Math.min(...eles) / roundTo) * roundTo : 0;
+  const maxEle = eles.length ? Math.ceil( Math.max(...eles) / roundTo) * roundTo : (imperial ? 1640 : 500);
   const useFTP = ftp || 250;
 
   const fmtTime = (mins) => {
@@ -2744,17 +2744,29 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                 <div className="stat-value">{imperial ? Math.round(effectiveStats.elevLossM * 3.281) : effectiveStats.elevLossM}<span className="stat-unit">{imperial ? "ft" : "m"}</span></div>
               </div>
             </div>
-            {gpxStats?.elevProfile?.length > 0 && (
-              <div style={{ height: 100, marginTop: 4 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={gpxStats.elevProfile} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-                    <XAxis dataKey="dist" tick={{ fill: T.textDim, fontSize: 10 }} tickFormatter={v => `${v}km`} />
-                    <YAxis tick={{ fill: T.textDim, fontSize: 10 }} width={32} />
-                    <Area type="monotone" dataKey="ele" stroke="rgba(120,120,120,0.6)" fill="rgba(80,80,80,0.3)" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            )}
+            {gpxStats?.elevProfile?.length > 0 && (() => {
+              const distUnit = imperial ? "mi" : "km";
+              const eleUnit  = imperial ? "ft" : "m";
+              const roundTo  = imperial ? 50 : 10;
+              const profileData = gpxStats.elevProfile.map(pt => ({
+                dist: imperial ? Math.round(pt.dist * 0.621 * 10) / 10 : pt.dist,
+                ele:  imperial ? Math.round(pt.ele * 3.281) : Math.round(pt.ele),
+              }));
+              const eleVals = profileData.map(p => p.ele);
+              const eleMin  = Math.floor(Math.min(...eleVals) / roundTo) * roundTo;
+              const eleMax  = Math.ceil( Math.max(...eleVals) / roundTo) * roundTo;
+              return (
+                <div style={{ height: 100, marginTop: 4 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={profileData} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+                      <XAxis dataKey="dist" tick={{ fill: T.textDim, fontSize: 10 }} tickFormatter={v => `${Math.round(v)}${distUnit}`} tickCount={6} />
+                      <YAxis domain={[eleMin, eleMax]} tick={{ fill: T.textDim, fontSize: 10 }} width={36} tickFormatter={v => `${v}${eleUnit}`} />
+                      <Area type="monotone" dataKey="ele" stroke="rgba(120,120,120,0.6)" fill="rgba(80,80,80,0.3)" dot={false} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              );
+            })()}
           </>
         )}
       </div>
