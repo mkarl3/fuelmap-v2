@@ -2234,17 +2234,23 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
                 </div>
               ))}
 
-              {/* Clear button */}
-              <button
-                className="btn-secondary"
-                style={{ fontSize: 11, marginTop: 4, marginBottom: 8 }}
-                onClick={() => {
-                  set("cpTests", [{ secs: 0, watts: 0 }, { secs: 0, watts: 0 }, { secs: 0, watts: 0 }]);
-                  set("cpTestedAt", null);
-                }}
-              >
-                Clear Values
-              </button>
+              {/* Clear button — disabled when all fields are already blank */}
+              {(() => {
+                const cpEmpty = form.cpTests.every(t => !t.secs && !t.watts) && !form.cpTestedAt;
+                return (
+                  <button
+                    className="btn-secondary"
+                    disabled={cpEmpty}
+                    style={{ fontSize: 11, marginTop: 4, marginBottom: 8, opacity: cpEmpty ? 0.35 : 1, cursor: cpEmpty ? "default" : "pointer" }}
+                    onClick={() => {
+                      set("cpTests", [{ secs: 0, watts: 0 }, { secs: 0, watts: 0 }, { secs: 0, watts: 0 }]);
+                      set("cpTestedAt", null);
+                    }}
+                  >
+                    Clear Values
+                  </button>
+                );
+              })()}
 
               {/* Live CP result */}
               {cpResult && (
