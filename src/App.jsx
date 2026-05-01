@@ -491,6 +491,7 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
       grade: Math.round(grade * 1000) / 10,
       distKm: Math.round(blockStartM / 100) / 10,
       speedKph,
+      blockTimeMin,
     });
     actualDurationMin += blockTimeMin;
   }
@@ -508,7 +509,16 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
     rollingAvgs.reduce((s, p) => s + Math.pow(p, 4), 0) / rollingAvgs.length,
     0.25
   ));
-  const avgPower = Math.round(powerStream.reduce((s, p) => s + p.power, 0) / blocks);
+  // Duration-weighted avg power, excluding zero-power blocks. Matches Garmin's
+  // convention (zeros from coasting excluded) and the ANALYZE-side calculation,
+  // making PLAN and ACTUAL directly comparable. Simple unweighted mean previously
+  // under-counted hard climb time (long, high-power blocks) and over-counted fast
+  // descent time (short, low-power blocks).
+  const activeBlocks = powerStream.filter(p => p.power > 0);
+  const totalActiveTime = activeBlocks.reduce((s, p) => s + p.blockTimeMin, 0);
+  const avgPower = totalActiveTime > 0
+    ? Math.round(activeBlocks.reduce((s, p) => s + p.power * p.blockTimeMin, 0) / totalActiveTime)
+    : 0;
   const ifActual = Math.round((normalizedPower / athlete.ftp) * 100) / 100;
   const tss = Math.round((actualDurationMin / 60) * ifActual * ifActual * 100);
 
@@ -518,8 +528,14 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
   const displayStream = [];
   for (let i = 0; i < powerStream.length; i += DISPLAY_BLOCK_MIN) {
     const slice = powerStream.slice(i, i + DISPLAY_BLOCK_MIN);
-    const avgDisplayPower = Math.round(slice.reduce((s, p) => s + p.power, 0) / slice.length);
+    // Duration-weighted, exclude zeros — same convention as headline avgPower above.
+    const sliceActive = slice.filter(p => p.power > 0);
+    const sliceActiveTime = sliceActive.reduce((s, p) => s + p.blockTimeMin, 0);
+    const avgDisplayPower = sliceActiveTime > 0
+      ? Math.round(sliceActive.reduce((s, p) => s + p.power * p.blockTimeMin, 0) / sliceActiveTime)
+      : 0;
     const peakGrade = Math.max(...slice.map(p => p.grade));
+    // S1-FOLLOWUP: grade and speed averaging left as simple means by design — revisit later.
     const avgGrade = Math.round(slice.reduce((s, p) => s + p.grade, 0) / slice.length * 10) / 10;
     const avgSpeed = Math.round(slice.reduce((s, p) => s + p.speedKph, 0) / slice.length * 10) / 10;
     displayStream.push({
