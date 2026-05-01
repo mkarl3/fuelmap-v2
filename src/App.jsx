@@ -5278,11 +5278,16 @@ export default function App() {
           </div>
         </div>
 
-        {/* Content */}
+        {/* Content — all tabs stay mounted; inactive ones are hidden via CSS so
+            in-session state (GPX, FIT, plan calculations) survives tab switches. */}
         <div style={{ maxWidth: 800, margin: "0 auto", padding: "20px 16px" }}>
-          {tab === "MODEL"   && <PlanTab athlete={athlete} athletes={athletes} setActiveAthleteId={setActiveAthleteId} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />}
-          {tab === "ANALYZE" && <AnalyzeTab athlete={athlete} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />}
-          {tab === "PERFORM" && (
+          <div style={{ display: tab === "MODEL"    ? undefined : "none" }}>
+            <PlanTab athlete={athlete} athletes={athletes} setActiveAthleteId={setActiveAthleteId} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />
+          </div>
+          <div style={{ display: tab === "ANALYZE"  ? undefined : "none" }}>
+            <AnalyzeTab athlete={athlete} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />
+          </div>
+          <div style={{ display: tab === "PERFORM"  ? undefined : "none" }}>
             <div style={{ padding: "40px 20px", textAlign: "center" }}>
               <div style={{ fontSize: 28, fontFamily: "Barlow Condensed", fontWeight: 700, color: T.textMuted, letterSpacing: "0.1em", marginBottom: 12 }}>PERFORM</div>
               <div style={{ fontSize: 16, fontFamily: "Barlow Condensed", fontWeight: 700, color: T.text, letterSpacing: "0.05em", marginBottom: 8 }}>Race Intelligence</div>
@@ -5293,10 +5298,16 @@ export default function App() {
                 <span style={{ color: "#FF3347" }}>M</span>odel · <span style={{ color: "#FF3347" }}>A</span>nalyze · <span style={{ color: "#FF3347" }}>P</span>erform
               </div>
             </div>
-          )}
-          {tab === "ATHLETES" && <AthletesTab athletes={athletes} setAthletes={setAthletes} activeAthleteId={activeAthleteId} setActiveAthleteId={setActiveAthleteId} imperial={imperial} bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />}
-          {tab === "GEAR"    && <BikesTab bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} imperial={imperial} />}
-          {tab === "LIBRARY" && <LibraryTab products={products} setProducts={setProducts} />}
+          </div>
+          <div style={{ display: tab === "ATHLETES" ? undefined : "none" }}>
+            <AthletesTab athletes={athletes} setAthletes={setAthletes} activeAthleteId={activeAthleteId} setActiveAthleteId={setActiveAthleteId} imperial={imperial} bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />
+          </div>
+          <div style={{ display: tab === "GEAR"     ? undefined : "none" }}>
+            <BikesTab bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} imperial={imperial} />
+          </div>
+          <div style={{ display: tab === "LIBRARY"  ? undefined : "none" }}>
+            <LibraryTab products={products} setProducts={setProducts} />
+          </div>
         </div>
       </div>
     </>
