@@ -477,7 +477,7 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
         if (catSettings.max > 0) blockCeiling = catSettings.max;
       }
     }
-    const blockWatts = Math.round(Math.min(blockCeiling, Math.max(blockFloor, Math.max(20, gradeWatts))));
+    const blockWatts = Math.round(Math.min(blockCeiling, Math.max(blockFloor, Math.max(60, gradeWatts))));
 
     // Actual speed WITH wind — headwind slows you, tailwind helps.
     const speed = speedAtPower(blockWatts, grade, totalMass, Crr, CdA, eta, rho, blockHeadwind);
