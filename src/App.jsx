@@ -2113,7 +2113,7 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
     if (hasValidCpTests) {
       const fit = cpResult.r2;
       const daysAgo = form.cpTestedAt ? Math.floor((Date.now() - new Date(form.cpTestedAt)) / 86400000) : null;
-      const stale = daysAgo !== null && daysAgo > 60;
+      const stale = daysAgo !== null && daysAgo > 90;
       if (stale) return { text: `${fit}% fit · ${daysAgo}d ago ⚠`, color: T.gold };
       return { text: `${fit}% fit ✓`, color: T.green };
     }
