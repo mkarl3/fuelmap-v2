@@ -2234,6 +2234,18 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
                 </div>
               ))}
 
+              {/* Clear button */}
+              <button
+                className="btn-secondary"
+                style={{ fontSize: 11, marginTop: 4, marginBottom: 8 }}
+                onClick={() => {
+                  set("cpTests", [{ secs: 0, watts: 0 }, { secs: 0, watts: 0 }, { secs: 0, watts: 0 }]);
+                  set("cpTestedAt", null);
+                }}
+              >
+                Clear Values
+              </button>
+
               {/* Live CP result */}
               {cpResult && (
                 <div style={{ marginTop: 10, padding: "10px 12px", background: T.bg, borderRadius: 4, border: `1px solid ${T.border}` }}>
