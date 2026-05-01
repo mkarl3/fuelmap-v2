@@ -1178,6 +1178,8 @@ const css = `
   input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; background: ${T.blue}; border-radius: 50%; cursor: pointer; }
   input[type=range]::-webkit-slider-thumb:hover { background: #6db3ff; }
   select, input[type=text], input[type=number] { background: ${T.surface2}; border: 1px solid ${T.border}; color: ${T.text}; padding: 6px 10px; border-radius: 4px; font-family: 'Barlow', sans-serif; font-size: 13px; outline: none; }
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; }
   select:focus, input:focus { border-color: ${T.blue}; }
   button { cursor: pointer; font-family: 'Barlow', sans-serif; }
   .tab-btn { background: none; border: none; color: ${T.textMuted}; font-family: 'Barlow Condensed', sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; padding: 10px 16px; border-bottom: 2px solid transparent; transition: all 0.15s; }
