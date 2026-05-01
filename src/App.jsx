@@ -1983,14 +1983,40 @@ function DropZone({ accept, label, onFile, loaded }) {
   );
 }
 
+// ─── WATT INPUT ───────────────────────────────────────────────────────────────
+// Module-level component so React doesn't remount it on every PlanTab render.
+// Uses local string state + onBlur to commit — avoids one-digit-at-a-time bug.
+function WattInput({ value, onChange, placeholder = "none" }) {
+  const [str, setStr] = useState(value > 0 ? String(value) : "");
+  // Sync display when parent resets value to 0 (e.g. clear button)
+  useEffect(() => { setStr(value > 0 ? String(value) : ""); }, [value]);
+  return (
+    <div style={{ position: "relative", width: 72 }}>
+      <input type="number" min={0} max={2000} step={5}
+        value={str}
+        placeholder={placeholder}
+        onChange={e => setStr(e.target.value)}
+        onBlur={() => {
+          const num = parseInt(str, 10);
+          if (str === "" || isNaN(num) || num <= 0) { onChange(0); setStr(""); }
+          else { onChange(num); setStr(String(num)); }
+        }}
+        style={{ width: "100%", paddingRight: 14, fontSize: 11 }} />
+      {value > 0 && <span style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", fontSize: 10, color: T.textMuted, pointerEvents: "none" }}>w</span>}
+    </div>
+  );
+}
+
 // ─── ATHLETE MODAL ────────────────────────────────────────────────────────────
 // ─── BIKE MODAL ───────────────────────────────────────────────────────────────
 function BikeModal({ bike, onSave, onClose, imperial }) {
   const [form, setForm] = useState({ ...bike });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const { CdA, eta, tireMult } = bikePhysics(form);
-  const displayWeight = imperial ? Math.round(form.weight * 2.205 * 10) / 10 : form.weight;
-  const setWeight = (val) => set("weight", imperial ? Math.round(val / 2.205 * 10) / 10 : val);
+  // Local display string for weight — avoids mid-keystroke unit conversion mangling the field
+  const [weightStr, setWeightStr] = useState(
+    imperial ? String(Math.round((bike.weight ?? 0) * 2.205 * 10) / 10) : String(bike.weight ?? 0)
+  );
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: 24, width: 380 }}>
@@ -2002,7 +2028,14 @@ function BikeModal({ bike, onSave, onClose, imperial }) {
         </div>
         <div style={{ marginBottom: 12 }}>
           <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Weight ({imperial ? "lb" : "kg"})</label>
-          <input type="number" value={displayWeight} onChange={e => setWeight(Number(e.target.value))} style={{ width: "100%" }} />
+          <input type="number" value={weightStr}
+            onChange={e => setWeightStr(e.target.value)}
+            onBlur={() => {
+              const num = parseFloat(weightStr);
+              if (!isNaN(num) && num > 0)
+                set("weight", imperial ? Math.round(num / 2.205 * 100) / 100 : num);
+            }}
+            style={{ width: "100%" }} />
         </div>
         <div style={{ marginBottom: 12 }}>
           <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Position</label>
@@ -2053,6 +2086,10 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
   const [overrideVal, setOverrideVal] = useState("");
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  // Local display string for weight — avoids mid-keystroke unit conversion mangling the field
+  const [weightStr, setWeightStr] = useState(
+    imperial ? String(Math.round((athlete.weight ?? 0) * 2.205 * 10) / 10) : String(athlete.weight ?? 0)
+  );
 
   // Live-derive W' from current form state
   const derivedWPrime = deriveWPrime(form);
@@ -2140,19 +2177,29 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
 
         <div style={{ marginBottom: 12 }}>
           <label style={labelStyle}>FTP (w)</label>
-          <input style={inputStyle} type="number" value={form.ftp} onChange={e => set("ftp", Number(e.target.value))} />
+          <input style={inputStyle} type="number"
+            value={form.ftp || ""}
+            onChange={e => set("ftp", e.target.value === "" ? 0 : Number(e.target.value))} />
         </div>
 
         <div style={{ marginBottom: 12 }}>
           <label style={labelStyle}>Max HR (bpm)</label>
-          <input style={inputStyle} type="number" value={form.maxHR || 185} onChange={e => set("maxHR", Number(e.target.value))} />
+          <input style={inputStyle} type="number"
+            value={form.maxHR || ""}
+            onChange={e => set("maxHR", e.target.value === "" ? 0 : Number(e.target.value))} />
         </div>
 
         <div style={{ marginBottom: 12 }}>
           <label style={labelStyle}>Weight ({imperial ? "lb" : "kg"})</label>
           <input style={inputStyle} type="number"
-            value={imperial ? Math.round(form.weight * 2.205 * 10) / 10 : form.weight}
-            onChange={e => set("weight", imperial ? Math.round(Number(e.target.value) / 2.205 * 10) / 10 : Number(e.target.value))} />
+            value={weightStr}
+            onChange={e => setWeightStr(e.target.value)}
+            onBlur={() => {
+              const num = parseFloat(weightStr);
+              if (!isNaN(num) && num > 0) {
+                set("weight", imperial ? Math.round(num / 2.205 * 100) / 100 : num);
+              }
+            }} />
         </div>
 
         {/* ── POWER PROFILE SECTION ── */}
@@ -2995,16 +3042,6 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           const [climbDetailOpen, setClimbDetailOpen] = useState(false);
           const catCounts = { moderate: 0, steep: 0, wall: 0 };
           detectedClimbs.forEach(c => { catCounts[c.category] = (catCounts[c.category] || 0) + 1; });
-
-          const WattInput = ({ value, onChange, placeholder = "none" }) => (
-            <div style={{ position: "relative", width: 72 }}>
-              <input type="number" min={0} max={2000} step={5} value={value || ""}
-                placeholder={placeholder}
-                onChange={e => onChange(e.target.value === "" ? 0 : Number(e.target.value))}
-                style={{ width: "100%", paddingRight: 14, fontSize: 11 }} />
-              {value > 0 && <span style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", fontSize: 10, color: T.textMuted, pointerEvents: "none" }}>w</span>}
-            </div>
-          );
 
           return (
             <div style={{ marginTop: 10 }}>
