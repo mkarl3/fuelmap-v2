@@ -162,37 +162,110 @@ export async function parseFIT(buffer) {
     byTs[off] = { power, hr, speedMs, alt, dist, cadence, temp, lat, lon };
   }
 
-  // ── Stop detection (copied from legacy parseFIT) ─────────────────────────
-  // Speed < 0.5 m/s for ≥ 5 consecutive seconds = stop period. Validated
-  // against Barry-Roubaix 2026 → matches Garmin Connect moving time exactly.
+  // ── Stop detection — three-tier strategy ────────────────────────────────
+  //
+  // Tier 1 (preferred): FIT timer events. The device writes timer_start and
+  // timer_stop_all events at the exact moments recording paused/resumed.
+  // These are device-authoritative — the same source Garmin Connect / Strava
+  // use to compute their displayed moving time.
+  //
+  // Tier 2: session.total_timer_time. Some files (notably Wahoo files
+  // re-exported from Strava) preserve the session aggregate but strip the
+  // individual timer events. In that case we know HOW MUCH time was paused
+  // but not WHEN, so the moving series still includes all elapsed seconds —
+  // displayed moving/stopped totals are correct, but per-second analysis
+  // can't filter out the paused intervals.
+  //
+  // Tier 3 (legacy fallback): speed < 0.5 m/s for ≥ 5 consecutive seconds.
+  // Used only when neither timer events nor session record are available.
+  // Validated against Barry-Roubaix 2026 → matches Garmin Connect exactly
+  // when the device writes zero-speed records through stops.
+
   let stoppedSec = 0;
-  let inStop = false;
-  let stopLen = 0;
   const stoppedOffsets = new Set();
-  const pendingStop = [];
-  for (let t = 0; t <= elapsedSec; t++) {
-    const r = byTs[t];
-    const isStopped = r ? (r.speedMs !== null && r.speedMs < STOP_SPEED_MS) : false;
-    if (isStopped) {
-      if (!inStop) { inStop = true; stopLen = 0; }
-      pendingStop.push(t);
-      stopLen++;
-    } else {
-      if (inStop) {
-        if (stopLen >= STOP_MIN_DURATION) {
-          stoppedSec += stopLen;
-          for (const s of pendingStop) stoppedOffsets.add(s);
+  let stopSource = 'speed-heuristic';
+
+  // Tier 1: timer events.
+  const timerEvents = (Array.isArray(data.events) ? data.events : [])
+    .filter(e => e.event === 'timer' && (e.event_type === 'start' || e.event_type === 'stop' || e.event_type === 'stop_all'))
+    .map(e => ({ off: e.timestamp instanceof Date ? Math.round((e.timestamp.getTime() - firstTs) / 1000) : null, type: e.event_type }))
+    .filter(e => e.off !== null && e.off >= 0)
+    .sort((a, b) => a.off - b.off);
+
+  if (timerEvents.length > 0) {
+    let stopStart = null;
+    for (const e of timerEvents) {
+      if (e.type === 'stop' || e.type === 'stop_all') {
+        if (stopStart === null) stopStart = e.off;
+        // else: already stopped; ignore duplicate stop events
+      } else if (e.type === 'start' && stopStart !== null) {
+        for (let t = stopStart; t < e.off; t++) {
+          if (t >= 0 && t <= elapsedSec) stoppedOffsets.add(t);
         }
-        inStop = false; stopLen = 0; pendingStop.length = 0;
+        stopStart = null;
       }
     }
+    // Trailing stop with no resume — mark to end of timeline.
+    if (stopStart !== null) {
+      for (let t = stopStart; t <= elapsedSec; t++) {
+        if (t >= 0) stoppedOffsets.add(t);
+      }
+    }
+    stoppedSec = stoppedOffsets.size;
+    if (stoppedSec > 0) stopSource = 'timer-events';
   }
-  if (inStop && stopLen >= STOP_MIN_DURATION) {
-    stoppedSec += stopLen;
-    for (const s of pendingStop) stoppedOffsets.add(s);
+
+  // Tier 3 fallback: speed-based heuristic (only if events found nothing).
+  if (stoppedOffsets.size === 0) {
+    let inStop = false;
+    let stopLen = 0;
+    let speedSec = 0;
+    const pendingStop = [];
+    for (let t = 0; t <= elapsedSec; t++) {
+      const r = byTs[t];
+      const isStopped = r ? (r.speedMs !== null && r.speedMs < STOP_SPEED_MS) : false;
+      if (isStopped) {
+        if (!inStop) { inStop = true; stopLen = 0; }
+        pendingStop.push(t);
+        stopLen++;
+      } else {
+        if (inStop) {
+          if (stopLen >= STOP_MIN_DURATION) {
+            speedSec += stopLen;
+            for (const s of pendingStop) stoppedOffsets.add(s);
+          }
+          inStop = false; stopLen = 0; pendingStop.length = 0;
+        }
+      }
+    }
+    if (inStop && stopLen >= STOP_MIN_DURATION) {
+      speedSec += stopLen;
+      for (const s of pendingStop) stoppedOffsets.add(s);
+    }
+    if (speedSec > 0) { stoppedSec = speedSec; stopSource = 'speed-heuristic'; }
   }
-  const movingMin  = Math.round((elapsedSec - stoppedSec) / 60);
-  const stoppedMin = Math.round(stoppedSec / 60);
+
+  // Tier 2 (display-only fallback): if we still have nothing and the session
+  // record reports a timer/elapsed gap, trust the session for displayed moving
+  // and stopped totals. Series filtering remains unchanged (we don't know the
+  // boundaries) — downstream NP/avg-power will still operate on all elapsed
+  // seconds, which is the existing behavior for files of this kind.
+  let displayMovingSec = elapsedSec - stoppedSec;
+  let displayStoppedSec = stoppedSec;
+  const session0 = Array.isArray(data.sessions) && data.sessions[0];
+  if (stoppedOffsets.size === 0 && session0 && typeof session0.total_timer_time === 'number') {
+    const timerSec   = Math.round(session0.total_timer_time);
+    const sessElapsed = typeof session0.total_elapsed_time === 'number'
+      ? Math.round(session0.total_elapsed_time) : elapsedSec;
+    if (timerSec < sessElapsed && timerSec > 0) {
+      displayMovingSec  = timerSec;
+      displayStoppedSec = Math.max(0, sessElapsed - timerSec);
+      stopSource = 'session-record';
+    }
+  }
+
+  const movingMin  = Math.round(displayMovingSec / 60);
+  const stoppedMin = Math.round(displayStoppedSec / 60);
 
   // ── Build elapsed-time 1-Hz power series for NP/avg power ────────────────
   // NP must be computed on the elapsed-time stream (with zeros for stopped
@@ -312,6 +385,7 @@ export async function parseFIT(buffer) {
     laps,
     hasPower: hasAnyPower,
     hasHR:    hasAnyHR,
+    stopSource, // 'timer-events' | 'speed-heuristic' | 'session-record' — diagnostic
   };
 }
 
