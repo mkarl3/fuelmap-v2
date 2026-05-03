@@ -193,26 +193,41 @@ export async function parseFIT(buffer) {
     .sort((a, b) => a.off - b.off);
 
   if (timerEvents.length > 0) {
+    // We only count COMPLETED stop→start pairs. A trailing stop with no
+    // matching start is almost always the end-of-activity marker (every FIT
+    // file has one); treating it as "auto-paused at end" produces a phantom
+    // 1-second stopped period that masks a real need to fall through to the
+    // speed heuristic. Exception: a trailing `stop_all` (auto-pause never
+    // resumed before activity end) is real — only that variant gets counted.
+    let pairsClosed = 0;
     let stopStart = null;
+    let stopStartType = null;
     for (const e of timerEvents) {
       if (e.type === 'stop' || e.type === 'stop_all') {
-        if (stopStart === null) stopStart = e.off;
+        if (stopStart === null) { stopStart = e.off; stopStartType = e.type; }
         // else: already stopped; ignore duplicate stop events
       } else if (e.type === 'start' && stopStart !== null) {
         for (let t = stopStart; t < e.off; t++) {
           if (t >= 0 && t <= elapsedSec) stoppedOffsets.add(t);
         }
+        pairsClosed++;
         stopStart = null;
+        stopStartType = null;
       }
     }
-    // Trailing stop with no resume — mark to end of timeline.
-    if (stopStart !== null) {
+    // Trailing stop_all only — bare stop at end of file is the activity-end
+    // marker, not a pause. Distinguishing the two avoids the BR-2026-TR bug
+    // where boundary {start, stop} events were treated as a 1-sec auto-pause.
+    if (stopStart !== null && stopStartType === 'stop_all') {
       for (let t = stopStart; t <= elapsedSec; t++) {
         if (t >= 0) stoppedOffsets.add(t);
       }
+      pairsClosed++; // trailing auto-pause counts as a real pause for source detection
     }
     stoppedSec = stoppedOffsets.size;
-    if (stoppedSec > 0) stopSource = 'timer-events';
+    // Only claim 'timer-events' as the source if we actually found real pause
+    // intervals. A file with only boundary start/stop should fall through.
+    if (pairsClosed > 0 && stoppedSec > 0) stopSource = 'timer-events';
   }
 
   // Tier 3 fallback: speed-based heuristic (only if events found nothing).
