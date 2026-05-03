@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ComposedChart, ReferenceLine, ReferenceArea } from "recharts";
 import { loadAllRaces, saveRace, updateRace, deleteRace } from './db.js';
+import { parseFIT, inferHasPower, inferHasHR } from './parsers/fitParser';
 
 // ─── DESIGN TOKENS ────────────────────────────────────────────────────────────
 // Source of truth: FuelMAP Brand & Design System v2
@@ -847,248 +848,6 @@ function parseGPX(xmlText) {
     courseBearings,
     avgCourseBearing,
     _gpxPts: pts, // {lat, lon, ele, cumDistM} — used for FIT-to-GPX position alignment
-  };
-}
-
-// ─── FIT PARSER (minimal binary) ──────────────────────────────────────────────
-// TODO(build): Replace this hand-rolled binary parser with `fit-file-parser` npm
-// package when FuelMAP moves to a real build environment. The custom parser covers
-// common Garmin fields but has known device compatibility gaps:
-//   - Wahoo Bolt V1: power not written to record messages (session summary only)
-//   - Some devices use only enhanced_speed/enhanced_altitude (handled)
-//   - Developer fields (Wahoo custom data) not parsed
-//   - Compressed timestamp records skipped
-// fit-file-parser handles the full FIT spec across all manufacturers and would
-// resolve all device compatibility issues in a single swap. High priority for
-// first real build milestone.
-function parseFIT(buffer) {
-  const view = new DataView(buffer);
-  const headerSize = view.getUint8(0);
-  let offset = headerSize;
-  const records = [];
-  const localDefs = {};
-
-  const POWER_FIELD = 7, HR_FIELD = 3, SPEED_FIELD = 6, TIMESTAMP_FIELD = 253,
-        ALTITUDE_FIELD = 2, DISTANCE_FIELD = 5, LAT_FIELD = 0, LON_FIELD = 1,
-        ENHANCED_SPEED_FIELD = 73,    // fallback when speed (field 6) absent
-        ENHANCED_ALTITUDE_FIELD = 78; // fallback when altitude (field 2) absent
-
-  try {
-    while (offset < buffer.byteLength - 2) {
-      const recordHeader = view.getUint8(offset++);
-      if (recordHeader & 0x80) {
-        // Compressed timestamp — advance past data fields using known definition
-        const localMsgNum = (recordHeader >> 5) & 0x3;
-        const def = localDefs[localMsgNum];
-        if (def) { for (const f of def.fields) { if (f.size > 0 && f.size <= 8) offset += f.size; } }
-        continue;
-      }
-      const msgType = (recordHeader >> 6) & 0x3;
-      const localMsgNum = recordHeader & 0x0F;
-
-      if (msgType === 1) { // definition
-        offset++; // reserved
-        const arch = view.getUint8(offset++);
-        const globalMsgNum = arch === 0 ? view.getUint16(offset, true) : view.getUint16(offset, false);
-        offset += 2;
-        const numFields = view.getUint8(offset++);
-        const fields = [];
-        for (let f = 0; f < numFields; f++) {
-          fields.push({ num: view.getUint8(offset), size: view.getUint8(offset + 1), type: view.getUint8(offset + 2) });
-          offset += 3;
-        }
-        localDefs[localMsgNum] = { globalMsgNum, fields, arch };
-      } else if (msgType === 0) { // data
-        const def = localDefs[localMsgNum];
-        if (!def) { break; }
-        const rec = { globalMsgNum: def.globalMsgNum };
-        for (const field of def.fields) {
-          if (field.size <= 0 || field.size > 8) { offset += field.size; continue; }
-          let val;
-          try {
-            val = field.size === 1 ? view.getUint8(offset)
-              : field.size === 2 ? view.getUint16(offset, def.arch === 0)
-              : field.size === 4 ? view.getUint32(offset, def.arch === 0)
-              : view.getBigUint64(offset, def.arch === 0);
-          } catch { val = 0; }
-          rec[field.num] = val;
-          offset += field.size;
-        }
-        if (def.globalMsgNum === 20) { // record message
-          const power    = rec[POWER_FIELD];
-          const hr       = rec[HR_FIELD];
-          const ts       = rec[TIMESTAMP_FIELD];
-          // Speed: prefer field 6 (speed), fall back to field 73 (enhanced_speed)
-          // enhanced_speed is already in m/s; speed field 6 is raw mm/s uint16
-          const speedRaw      = rec[SPEED_FIELD];
-          const enhSpeedRaw   = rec[ENHANCED_SPEED_FIELD];
-          // Altitude: prefer field 2 (altitude, raw * 0.2 - 500 = m),
-          //           fall back to field 78 (enhanced_altitude, already in meters as uint32)
-          const altRaw        = rec[ALTITUDE_FIELD];
-          const enhAltRaw     = rec[ENHANCED_ALTITUDE_FIELD];
-          const distRaw       = rec[DISTANCE_FIELD];
-          const latRaw        = rec[LAT_FIELD];
-          const lonRaw        = rec[LON_FIELD];
-
-          if (power !== undefined && power !== 65535) {
-            const toSignedInt32 = (v) => v > 0x7FFFFFFF ? v - 0x100000000 : v;
-            const SEMICIRCLE_TO_DEG = 180 / 2147483648;
-
-            // Speed stored as raw mm/s (field 6) or m/s * 1000 (enhanced field 73)
-            // Both fields store as uint32 scaled the same way in this context (mm/s)
-            const effectiveSpeedRaw = speedRaw ?? enhSpeedRaw ?? 0;
-
-            // Altitude: field 2 raw * 0.2 - 500 = meters
-            //           field 78 enhanced: same scaling (uint32, * 0.2 - 500)
-            let altM = null;
-            if (altRaw !== undefined) {
-              altM = Math.round((Number(altRaw) * 0.2 - 500) * 10) / 10;
-            } else if (enhAltRaw !== undefined) {
-              altM = Math.round((Number(enhAltRaw) * 0.2 - 500) * 10) / 10;
-            }
-
-            records.push({
-              power:   Number(power),
-              hr:      hr ? Number(hr) : 0,
-              ts:      ts ? Number(ts) : 0,
-              speedMs: effectiveSpeedRaw ? Number(effectiveSpeedRaw) : 0,
-              altM,
-              dist:    distRaw !== undefined ? Number(distRaw) / 100 : null,
-              lat:     latRaw !== undefined ? toSignedInt32(Number(latRaw)) * SEMICIRCLE_TO_DEG : null,
-              lon:     lonRaw !== undefined ? toSignedInt32(Number(lonRaw)) * SEMICIRCLE_TO_DEG : null,
-            });
-          }
-        }
-      } else { break; }
-    }
-  } catch (e) { /* partial parse ok */ }
-
-  if (records.length === 0) return null;
-
-  // ── Elapsed time from timestamps ──────────────────────────────────────────
-  const tsStart = records[0].ts;
-  const tsEnd   = records[records.length - 1].ts;
-  const elapsedSec = (tsStart > 0 && tsEnd > tsStart) ? (tsEnd - tsStart) : records.length;
-  const elapsedMin = Math.round(elapsedSec / 60);
-
-  // ── Moving time: exclude periods where speed < 0.5 m/s (500 mm/s) for ≥ 5 seconds ──
-  // Threshold 0.5 m/s matches Garmin device moving-time methodology.
-  // Strict zero misses slow rollout/rolldown around stops and understates stopped time.
-  // Validated: Barry-Roubaix 2026 → 4:22 moving time matching Garmin Connect exactly.
-  // speedMs field is raw mm/s (uint16) — compare against 500 (= 0.5 m/s).
-  const byTs = {};
-  for (const r of records) { if (r.ts > 0) byTs[r.ts - tsStart] = r; }
-  let stoppedSec = 0;
-  let inStop = false;
-  let stopLen = 0;
-  let stopStart = 0;
-  const stoppedOffsets = new Set();
-  const pendingStop = [];
-  const STOP_SPEED_THRESHOLD = 500; // mm/s = 0.5 m/s ≈ 1.1 mph
-  const STOP_MIN_DURATION    = 5;   // seconds — Garmin uses ~5s minimum
-  for (let t = 0; t <= elapsedSec; t++) {
-    const r = byTs[t];
-    const isStopped = r ? r.speedMs < STOP_SPEED_THRESHOLD : false;
-    if (isStopped) {
-      if (!inStop) { inStop = true; stopLen = 0; }
-      pendingStop.push(t);
-      stopLen++;
-    } else {
-      if (inStop) {
-        if (stopLen >= STOP_MIN_DURATION) {
-          stoppedSec += stopLen;
-          for (const s of pendingStop) stoppedOffsets.add(s);
-        }
-        inStop = false; stopLen = 0; pendingStop.length = 0;
-      }
-    }
-  }
-  if (inStop && stopLen >= STOP_MIN_DURATION) {
-    stoppedSec += stopLen;
-    for (const s of pendingStop) stoppedOffsets.add(s);
-  }
-  const movingMin = Math.round((elapsedSec - stoppedSec) / 60);
-  const stoppedMin = Math.round(stoppedSec / 60);
-
-  // ── NP and avgPower from raw 1-second data (correct 30-sec rolling average method) ──
-  const powerByTs = {};
-  for (const r of records) { if (r.ts > 0) powerByTs[r.ts - tsStart] = r.power; }
-  const powerSeries = [];
-  for (let t = 0; t <= elapsedSec; t++) powerSeries.push(powerByTs[t] !== undefined ? powerByTs[t] : 0);
-  const rawAvgPower = Math.round(powerSeries.reduce((s, p) => s + p, 0) / powerSeries.length);
-  const rollingAvgs = [];
-  for (let i = 0; i < powerSeries.length; i++) {
-    const w = powerSeries.slice(Math.max(0, i - 29), i + 1);
-    rollingAvgs.push(w.reduce((s, p) => s + p, 0) / w.length);
-  }
-  const rawNP = Math.round(Math.pow(rollingAvgs.reduce((s, p) => s + Math.pow(p, 4), 0) / rollingAvgs.length, 0.25));
-
-  // ── 5-min block map — keyed by MOVING time offset, stopped seconds excluded ──
-  // TODO(validation): 5-min block averaging is appropriate for the power chart overlay
-  // and zone distribution, but masks short hard efforts for any intensity-based metric.
-  // Revisit block size for: zone distribution (coarse), HR per block (coarse),
-  // fade analysis NP per third (acceptable — NP smooths naturally), threshold exposure
-  // (minutes-based so block size matters less). W'bal already fixed to use 1-second data.
-  // This ensures the power chart aligns with the plan (which predicts moving time only).
-  // Stopped periods (aid stations, mechanicals) are stripped out before bucketing.
-  const blockSize = 300; // seconds per block = 5 min
-  const blockMap = {};
-  let movingOffset = 0; // running moving-time counter in seconds
-  for (let t = 0; t <= elapsedSec; t++) {
-    if (stoppedOffsets.has(t)) continue; // skip stopped seconds
-    const r = byTs[t];
-    if (!r) { movingOffset++; continue; } // gap in recording — advance moving clock
-    const block = Math.floor(movingOffset / blockSize) * 5; // key = moving minutes
-    if (!blockMap[block]) blockMap[block] = { powers: [], hrs: [] };
-    blockMap[block].powers.push(r.power);
-    blockMap[block].hrs.push(r.hr);
-    movingOffset++;
-  }
-
-  // Build moving-time 1-second power + altitude + distance delta + HR series
-  // TODO(validation): 5-min block averaging is appropriate for the power chart overlay
-  // and zone distribution, but masks short hard efforts for any intensity-based metric.
-  // Revisit block size for: zone distribution (coarse), HR per block (coarse),
-  // fade analysis NP per third (acceptable — NP smooths naturally), threshold exposure
-  // (minutes-based so block size matters less). W'bal already fixed to use 1-second data.
-  const movingPowerSeries = [];
-  const movingAltSeries   = [];
-  const movingDistSeries  = []; // per-second distance delta (m) — used for speed + terrain grade
-  const movingHRSeries    = []; // per-second HR (bpm)
-  let prevDistM = null;
-  for (let t = 0; t <= elapsedSec; t++) {
-    if (stoppedOffsets.has(t)) continue;
-    const r = byTs[t];
-    movingPowerSeries.push(r ? r.power : 0);
-    movingAltSeries.push(r?.altM ?? null);
-    movingHRSeries.push(r ? r.hr : 0);
-    // Distance delta per second
-    const distM = r?.dist ?? null;
-    if (distM !== null && prevDistM !== null) {
-      movingDistSeries.push(Math.max(0, distM - prevDistM));
-    } else {
-      movingDistSeries.push(0);
-    }
-    if (distM !== null) prevDistM = distM;
-  }
-
-  // First valid GPS coordinate — used to align FIT start position to GPX route
-  const firstGPS = records.find(r => r.lat !== null && r.lon !== null && Math.abs(r.lat) > 0.01);
-
-  return {
-    blockMap,
-    elapsedMin,
-    movingMin,
-    stoppedMin,
-    durationMin: movingMin,
-    totalRecords: records.length,
-    rawAvgPower,
-    rawNP,
-    movingPowerSeries,
-    movingAltSeries,
-    movingDistSeries,
-    movingHRSeries,
-    firstGPS: firstGPS ? { lat: firstGPS.lat, lon: firstGPS.lon, dist: firstGPS.dist ?? 0 } : null,
   };
 }
 
@@ -3540,20 +3299,29 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   const [fitSaved, setFitSaved] = useState(false);
   const [actualIntake, setActualIntake] = useState([]);
   const [fitError, setFitError] = useState(null);
+  const [noPowerToastDismissed, setNoPowerToastDismissed] = useState(false);
+
+  // Derived: does the loaded FIT have power / HR? Falls back to inferring from
+  // the data shape, so old saved races without explicit hasPower/hasHR flags
+  // still work correctly.
+  const hasPower = inferHasPower(fitData);
+  const hasHR    = inferHasHR(fitData);
 
   // When the selected race changes, auto-load stored FIT data if present.
   useEffect(() => {
-    if (!selectedRaceId) { setFitSaved(false); return; }
+    if (!selectedRaceId) { setFitSaved(false); setNoPowerToastDismissed(false); return; }
     const race = races.find(r => r.id === Number(selectedRaceId));
     if (race?.fit) {
       setFitData(race.fit);
       setFitFile(race.fit.fileName ?? 'Saved FIT');
       setFitError(null);
       setFitSaved(true);
+      setNoPowerToastDismissed(false);
     } else {
       setFitData(null);
       setFitFile(null);
       setFitSaved(false);
+      setNoPowerToastDismissed(false);
     }
   }, [selectedRaceId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -3577,6 +3345,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       elapsedMin:        fitData.elapsedMin,
       movingMin:         fitData.movingMin,
       stoppedMin:        fitData.stoppedMin,
+      durationMin:       fitData.durationMin ?? fitData.movingMin,
       rawAvgPower:       fitData.rawAvgPower,
       rawNP:             fitData.rawNP,
       totalRecords:      fitData.totalRecords,
@@ -3586,6 +3355,14 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       movingHRSeries:    fitData.movingHRSeries,
       blockMap:          fitData.blockMap,
       firstGPS:          fitData.firstGPS,
+      // New additive fields (forward-compat). Old saves loaded later won't
+      // have these — downstream code falls back via inferHasPower/inferHasHR.
+      movingCadenceSeries: fitData.movingCadenceSeries ?? null,
+      movingTempSeries:    fitData.movingTempSeries    ?? null,
+      fullGPSPath:         fitData.fullGPSPath         ?? null,
+      laps:                fitData.laps               ?? null,
+      hasPower:            typeof fitData.hasPower === 'boolean' ? fitData.hasPower : undefined,
+      hasHR:               typeof fitData.hasHR    === 'boolean' ? fitData.hasHR    : undefined,
     };
     try {
       const id = Number(selectedRaceId);
@@ -3597,10 +3374,20 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     }
   };
 
-  const handleFIT = (buffer, name) => {
-    const result = parseFIT(buffer);
-    if (result) { setFitData(result); setFitFile(name); setFitError(null); setFitSaved(false); }
-    else setFitError("Could not parse FIT file. If you're using a Wahoo Bolt V1 or older device, power data may not be written to record messages — try exporting from TrainingPeaks or use a Garmin device. Other formats: ensure the file is a valid .fit activity file, not a course or workout file.");
+  const handleFIT = async (buffer, name) => {
+    let result = null;
+    try { result = await parseFIT(buffer); }
+    catch { result = null; }
+    if (result) {
+      setFitData(result);
+      setFitFile(name);
+      setFitError(null);
+      setFitSaved(false);
+      // Reset the no-power dismissal so the toast reappears for each new upload.
+      setNoPowerToastDismissed(false);
+    } else {
+      setFitError("Could not parse FIT file. Ensure the file is a valid .fit activity file, not a course or workout file.");
+    }
   };
 
   const fitPowerStream = fitData ? buildPowerStreamFromFIT(fitData, athlete) : [];
@@ -3738,9 +3525,24 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         </div>
         <DropZone accept=".fit" label="Drop .fit file or click to upload" onFile={handleFIT} loaded={fitFile} />
         {fitError && <div className="alert alert-danger" style={{ marginTop: 8 }}>{fitError}</div>}
+        {/* No-power dismissible toast — appears immediately on parse, before metadata. */}
+        {fitData && !hasPower && !noPowerToastDismissed && (
+          <div className="alert alert-warn" style={{ marginTop: 8, justifyContent: "space-between", alignItems: "flex-start" }}>
+            <span>⚠ This file has no power data. Time, distance, elevation, and heart rate metrics will be shown. Power-based analysis is unavailable.</span>
+            <button onClick={() => setNoPowerToastDismissed(true)}
+              style={{ background: "none", border: "none", color: T.gold, fontSize: 16, cursor: "pointer", padding: "0 4px", marginLeft: 8, lineHeight: 1 }}>
+              ×
+            </button>
+          </div>
+        )}
         {fitData && (
-          <div style={{ marginTop: 10, fontSize: 12, color: T.textMuted }}>
-            {fitData.totalRecords.toLocaleString()} records · Moving: {minsToHHMM(fitData.movingMin)} · Elapsed: {minsToHHMM(fitData.elapsedMin)}
+          <div style={{ marginTop: 10, fontSize: 12, color: T.textMuted, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span>{fitData.totalRecords.toLocaleString()} records · Moving: {minsToHHMM(fitData.movingMin)} · Elapsed: {minsToHHMM(fitData.elapsedMin)}</span>
+            {!hasPower && (
+              <span style={{ fontSize: 10, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: T.gold, background: "rgba(255,184,0,0.12)", border: `1px solid rgba(255,184,0,0.4)`, padding: "2px 8px", borderRadius: 3 }}>
+                ⚠ no power data
+              </span>
+            )}
           </div>
         )}
         {fitData && selectedRaceId && (
@@ -3753,8 +3555,8 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         )}
       </div>
 
-      {/* Planned vs Actual header */}
-      {selectedPlan && actualMetrics && (
+      {/* Planned vs Actual header — power-dependent */}
+      {hasPower && selectedPlan && actualMetrics && (
         <div className="card">
           <div className="card-header">Planned vs Actual</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 8 }}>
@@ -3821,8 +3623,9 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         </div>
       )}
 
-      {/* Standalone actual metrics — always shown when FIT is loaded (with or without a plan) */}
-      {actualMetrics && !selectedPlan && (
+      {/* Standalone actual metrics — always shown when FIT is loaded (with or without a plan).
+          Power-dependent (NP / IF / TSS / zone distribution all need power). */}
+      {hasPower && actualMetrics && !selectedPlan && (
         <div className="card">
           <div className="card-header">Ride Summary</div>
           <div className="stat-row">
@@ -3849,7 +3652,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
 
       {/* Power Analysis — actual as filled area (zone-colored stroke), planned as muted line.
            Gap between the two = delta at a glance. Standalone mode: area only, no planned line. */}
-      {fitPowerStream.length > 0 && (() => {
+      {hasPower && fitPowerStream.length > 0 && (() => {
         const allVals = overlayChartData.flatMap(d => [d.actualPower || 0, d.plannedPower || 0]).filter(Boolean);
         const yMax = Math.ceil((Math.max(...allVals) * 1.12) / 50) * 50;
         const yMin = Math.max(0, Math.floor((Math.min(...allVals) * 0.88) / 50) * 50);
@@ -4078,8 +3881,11 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         );
       })()}
 
-      {/* ── EFFORT & FATIGUE ─────────────────────────────────────────── */}
-      {fitPowerStream.length > 0 && fitPowerStream.some(b => b.hr > 0) && (() => {
+      {/* ── EFFORT & FATIGUE ───────────────────────────────────────────
+           Power-dependent: every section in this card (Cardiac Efficiency,
+           Threshold Exposure, Effort vs Plan, Anaerobic Reserve) is built on
+           the moving power series. Hide the entire card when no power data. */}
+      {hasPower && fitPowerStream.length > 0 && fitPowerStream.some(b => b.hr > 0) && (() => {
         const maxHR    = athlete.maxHR || 185;
         const rawSeries = fitData?.movingPowerSeries ?? [];
         const n = rawSeries.length;
@@ -4851,8 +4657,8 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               );
             })()}
 
-            {/* ── Climb Pacing Table ── */}
-            {perClimbStats.length > 0 && (() => {
+            {/* ── Climb Pacing Table — power-dependent (NP per climb, W'bal at exit) ── */}
+            {hasPower && perClimbStats.length > 0 && (() => {
               const hasPlan = !!(selectedPlan?.pacingPlan?.displayStream);
               const catDotColor = (cat) => {
                 if (cat === "wall")   return T.red;
