@@ -3,12 +3,18 @@
 // Per spec 3.5 target state changes from legacy:
 //  • Skiba math extracted to `simulateWbal` (CC#3) — single source of truth.
 //  • dt parameterized (`options.blockSeconds`, defaults to 60). Under CC#7
-//    in Prompt 4, PLAN side will pass dt=1 alongside 1-second resampling.
+//    (Prompt 4B Step 2), PLAN side passes dt=1 alongside `powerStreamPerSec`,
+//    matching ANALYZE side. Caller selects:
+//      • `buildWbal(plan.powerStreamPerSec, athlete, { blockSeconds: 1 })`
+//        — preferred path; CC#7 canonical (1-sec, matches device numbers).
+//      • `buildWbal(plan.powerStream, athlete)` — fallback for legacy plans
+//        saved before CC#7 landed (no `powerStreamPerSec` field on disk).
+//        Uses dt=60 over 1-min blocks; sub-1% drift vs canonical, acceptable
+//        for older saves until they're recomputed on next plan edit.
 //  • CP source dispatch: when athlete has CP test data, both CP and W' come
 //    from `fitCPModel`. Otherwise both fall back to FTP-based defaults.
 //    Mixing fitted CP with FTP-derived W' (or vice versa) is forbidden by
 //    the data-integrity constraint (spec 3.5 #4).
-//  • Legacy stale 5-min comment removed (current code is 1-min, soon 1-sec).
 //
 // **Behavior shift (microscopic):** legacy code branched on `power >= CP`
 // (depletion) while `simulateWbal` branches on `power > CP`. At exactly

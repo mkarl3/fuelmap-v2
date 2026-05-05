@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ComposedChart, ReferenceLine, ReferenceArea } from "recharts";
 import { loadAllRaces, saveRace, updateRace, deleteRace } from './db.js';
 import { parseFIT, inferHasPower, inferHasHR } from './parsers/fitParser';
@@ -8,6 +8,7 @@ import {
   computeVI, estimateDuration, computeCP, deriveWPrime, getSegmentIF,
   buildWbal, buildWbalFromRawSeries, buildPerClimbStats, detectClimbs,
   buildPowerStream, flatIFForTargetNP,
+  alignFitToGpx,
   fitWarn,
   COGGAN_ZONES, DEFAULTS,
 } from './physics/index.js';
@@ -571,37 +572,55 @@ function ZoneComparisonBar({ actualStream, plannedStream, ftp }) {
 
 // ─── TERRAIN CLASSIFICATION ───────────────────────────────────────────────────
 // Classifies each moving-time second into climb / flat / descent.
-// Priority: GPX segmentGrades (accurate, noise-free) → FIT 60s rolling altitude window.
-// GPX approach: map each FIT second to route position via cumulative distance,
-//   look up the GPX segment grade at that position.
+//
+// **CC#8 (Prompt 4B Step 5):** when `alignment` is provided (per-second
+// `alignFitToGpx` output), each on-route second's grade is looked up at the
+// aligned GPX distance directly. Off-route seconds (rider deviated from the
+// route) fall back to the FIT-altitude grade window for that second only —
+// no constant gpxOffsetM single-point offset, no smearing of off-route detours
+// onto the planned route. Pre-CC#8 single-point offset model is gone.
+//
+// Priority:
+//   1. alignment[i].onRoute  → GPX segment grade at alignment[i].gpxDistM
+//   2. FIT altitude (60s rolling)  → for off-route or no-alignment cases
+//
 // FIT fallback: 60-second rolling altitude delta / distance covered.
 //   60s chosen over 30s — validation showed 60s stdev=2.54% vs 30s=3.42%,
 //   and terrain distribution matched GPX much more closely (66% flat vs 68% GPX).
 // Thresholds: >2% = climb, <-2% = descent, else flat.
 //   Validated against Barry-Roubaix GPX: FIT-60s gives climb=23%/flat=66%/descent=12%
 //   vs GPX 17%/68%/15% — close enough for terrain bucketing.
-function buildTerrainStream(movingPowerSeries, movingAltSeries, movingDistSeries, gpxRoute, gpxOffsetM = 0) {
+function buildTerrainStream(movingPowerSeries, movingAltSeries, movingDistSeries, gpxRoute, alignment = null) {
   const n = movingPowerSeries.length;
   const CLIMB = 0.02, DESCENT = -0.02;
   const grades = new Float32Array(n);
 
   const hasDistData = movingDistSeries && movingDistSeries.some(d => d > 0);
+  const hasAlignment = Array.isArray(alignment) && alignment.length === n;
+  const hasGpxRoute = gpxRoute?.segmentGrades?.length > 0;
 
-  if (gpxRoute?.segmentGrades?.length > 0 && hasDistData) {
-    // segmentGrades[].distM is segment LENGTH, not cumulative — build cumulative array first
-    const segs = gpxRoute.segmentGrades;
+  // Build cumulative-grade lookup once if GPX is available.
+  let cumSegs = null;
+  if (hasGpxRoute) {
     let cumBuild = 0;
-    const cumSegs = segs.map(s => { cumBuild += s.distM; return { cumDistM: cumBuild, gradeDecimal: s.gradeDecimal }; });
-    let cumDistM = gpxOffsetM; // start at the offset so FIT position maps correctly onto GPX
-    let segIdx = 0;
-    // Position segIdx at the offset start
-    while (segIdx < cumSegs.length - 1 && cumDistM > cumSegs[segIdx].cumDistM) segIdx++;
-    for (let i = 0; i < n; i++) {
-      cumDistM += (movingDistSeries[i] || 0);
-      while (segIdx < cumSegs.length - 1 && cumDistM > cumSegs[segIdx].cumDistM) segIdx++;
-      grades[i] = cumSegs[segIdx].gradeDecimal;
+    cumSegs = gpxRoute.segmentGrades.map(s => {
+      cumBuild += s.distM;
+      return { cumDistM: cumBuild, gradeDecimal: s.gradeDecimal };
+    });
+  }
+  const gradeAtGpxDist = (distM) => {
+    if (!cumSegs) return 0;
+    // Linear scan — segmentGrades is 200 entries, fast enough.
+    for (let i = 0; i < cumSegs.length; i++) {
+      if (distM <= cumSegs[i].cumDistM) return cumSegs[i].gradeDecimal;
     }
-  } else if (movingAltSeries) {
+    return cumSegs[cumSegs.length - 1].gradeDecimal;
+  };
+
+  // Compute FIT-altitude fallback grade for ALL seconds first — used when
+  // alignment is missing or a particular second is off-route.
+  const fitGrade = new Float32Array(n);
+  if (movingAltSeries) {
     // FIT fallback: smooth altitude first (15s median) to remove GPS spikes,
     // then 60s rolling grade window. Clamp to ±25% to eliminate residual glitches.
     // Validated: smoothed 60s window gives climb=22%/flat=67%/descent=11% on Barry-Roubaix,
@@ -627,7 +646,17 @@ function buildTerrainStream(movingPowerSeries, movingAltSeries, movingDistSeries
         ? (() => { let d = 0; for (let j = i-60; j < i; j++) d += (movingDistSeries[j] || 0); return d; })()
         : 60 * 4.5;
       const rawGrade = dist > 4 ? altDelta / dist : 0;
-      grades[i] = Math.max(-0.25, Math.min(0.25, rawGrade)); // clamp ±25%
+      fitGrade[i] = Math.max(-0.25, Math.min(0.25, rawGrade)); // clamp ±25%
+    }
+  }
+
+  // Per-second grade selection: alignment-driven GPX lookup when on-route,
+  // FIT fallback when off-route or alignment unavailable.
+  for (let i = 0; i < n; i++) {
+    if (hasAlignment && alignment[i].onRoute && hasGpxRoute) {
+      grades[i] = gradeAtGpxDist(alignment[i].gpxDistM);
+    } else {
+      grades[i] = fitGrade[i];
     }
   }
 
@@ -636,44 +665,19 @@ function buildTerrainStream(movingPowerSeries, movingAltSeries, movingDistSeries
   return Array.from(grades, g => g > CLIMB ? 'climb' : g < DESCENT ? 'descent' : 'flat');
 }
 
-// Bucket moving-time data by terrain type
-function bucketByTerrain(movingPowerSeries, movingAltSeries, movingDistSeries, movingHRSeries, gpxRoute, ftp, fitFirstGPS) {
-  // Compute GPS offset: how far into the GPX route the FIT recording started.
-  // Common in races — rider starts Garmin in staging area before the start line.
-  let gpxOffsetM = 0;
-  if (gpxRoute?.segmentGrades?.length > 0 && fitFirstGPS) {
-    if (gpxRoute._gpxPts) {
-      // Best path: full GPX point array available — nearest-neighbor GPS match.
-      // BOUNDED SEARCH: only consider GPX points within DEFAULTS.gpsMatchSearchWindowM
-      // of the route start. The rider's first GPS is by definition near the start;
-      // on loop courses the route's last point sits geographically near the start
-      // too, and an unbounded search picks that, collapsing the offset to ~routeLen.
-      // See Prompt 3.5 regression diagnosis.
-      const haversine = (lat1, lon1, lat2, lon2) => {
-        const R = 6371000, toRad = Math.PI / 180;
-        const dLat = (lat2 - lat1) * toRad, dLon = (lon2 - lon1) * toRad;
-        const a = Math.sin(dLat/2)**2 + Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*Math.sin(dLon/2)**2;
-        return R * 2 * Math.asin(Math.sqrt(a));
-      };
-      const pts = gpxRoute._gpxPts;
-      let minD = Infinity, minIdx = 0;
-      for (let i = 0; i < pts.length; i++) {
-        if (pts[i].cumDistM > DEFAULTS.gpsMatchSearchWindowM) break; // pts are in route order
-        const d = haversine(pts[i].lat, pts[i].lon, fitFirstGPS.lat, fitFirstGPS.lon);
-        if (d < minD) { minD = d; minIdx = i; }
-      }
-      // Only use GPS match if it found a reasonably close point (< 2km)
-      gpxOffsetM = minD < 2000 ? pts[minIdx].cumDistM : 0;
-    } else {
-      // Fallback: _gpxPts not in saved plan (plan saved before this feature was added).
-      // Use FIT's own cumulative distance at first GPS record as a rough proxy.
-      // Note: this will be inaccurate if the rider started recording before the route start.
-      // Re-save the plan after re-uploading the GPX to get accurate GPS offset matching.
-      gpxOffsetM = fitFirstGPS.dist ?? 0;
-    }
-  }
-
-  const terrain = buildTerrainStream(movingPowerSeries, movingAltSeries, movingDistSeries, gpxRoute, gpxOffsetM);
+// Bucket moving-time data by terrain type.
+//
+// **CC#8 (Prompt 4B Step 5):** signature changed — `fitFirstGPS` parameter is
+// gone, replaced by `alignment` (the output of `alignFitToGpx` aligning the
+// FIT's per-moving-second GPS path to the GPX route). The pre-CC#8 single-
+// point gpxOffsetM model assumed a constant offset between FIT distance and
+// GPX distance, which broke on loop courses (Prompt 3.5) and on any ride
+// where the rider went off-route. Per-second alignment handles both cases:
+// loop-course start/end ambiguity is resolved by per-point nearest-neighbor,
+// and off-route seconds are flagged so they don't smear onto planned-route
+// terrain stats.
+function bucketByTerrain(movingPowerSeries, movingAltSeries, movingDistSeries, movingHRSeries, gpxRoute, ftp, alignment) {
+  const terrain = buildTerrainStream(movingPowerSeries, movingAltSeries, movingDistSeries, gpxRoute, alignment);
   const n = movingPowerSeries.length;
   const t1End = Math.floor(n / 3);
   const t2End = Math.floor(2 * n / 3);
@@ -1738,7 +1742,15 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
 
   const overlayData = pacingPlan
     ? buildNutritionOverlay(pacingPlan.displayStream, intakeEvents, athlete, preRaceMeal) : [];
-  const wbalData = pacingPlan ? buildWbal(pacingPlan.powerStream, athlete) : [];
+  // CC#7 (Prompt 4B Step 2): prefer per-second stream at dt=1 for PLAN-side
+  // W'bal — matches ANALYZE side's 1-sec math and device numbers. Legacy
+  // plans (saved before 4B) lack `powerStreamPerSec`; fall back to 1-min
+  // blocks at dt=60 — sub-1% drift, acceptable until next recompute.
+  const wbalData = pacingPlan
+    ? (pacingPlan.powerStreamPerSec
+        ? buildWbal(pacingPlan.powerStreamPerSec, athlete, { blockSeconds: 1 })
+        : buildWbal(pacingPlan.powerStream, athlete))
+    : [];
 
   // Sensitivity analysis state — sliders adjust inputs, show Δ duration live
   const [sensOpen, setSensOpen] = useState(false);
@@ -2854,6 +2866,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       // have these — downstream code falls back via inferHasPower/inferHasHR.
       movingCadenceSeries: fitData.movingCadenceSeries ?? null,
       movingTempSeries:    fitData.movingTempSeries    ?? null,
+      movingGPSPath:       fitData.movingGPSPath       ?? null,
       fullGPSPath:         fitData.fullGPSPath         ?? null,
       laps:                fitData.laps               ?? null,
       hasPower:            typeof fitData.hasPower === 'boolean' ? fitData.hasPower : undefined,
@@ -2889,6 +2902,23 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   const fitOverlay = fitPowerStream.length
     ? buildNutritionOverlay(fitPowerStream, actualIntake, athlete, 120) : [];
 
+  // CC#8 (Prompt 4B Step 5): per-second FIT-to-GPX alignment. One pass; both
+  // bucketByTerrain and perClimbStats consume the same alignment array. Off-
+  // route seconds (rider deviated from the planned route) are flagged so they
+  // don't smear onto planned-route grade lookup or per-climb stats.
+  // Empty when: no plan loaded, plan saved before _gpxPts were captured, or
+  // FIT saved before movingGPSPath was added (legacy save). Downstream code
+  // tolerates empty/null alignment by falling back to FIT-altitude grade.
+  const gpxRouteForAlign = selectedPlan?.route ?? null;
+  // Memoized: alignment is O(N×M) and runs ~9 s on BR-sized rides. Caching
+  // across re-renders keyed off the two inputs (object identity stable across
+  // tab interactions) avoids recomputing on every state change. Spatial-index
+  // optimization for the cold path is deferred to the perf-focused prompt.
+  const alignment = useMemo(() => {
+    if (!fitData?.movingGPSPath?.length || !gpxRouteForAlign?._gpxPts?.length) return null;
+    return alignFitToGpx(fitData.movingGPSPath, gpxRouteForAlign._gpxPts);
+  }, [fitData?.movingGPSPath, gpxRouteForAlign?._gpxPts]);
+
   // Terrain analysis — GPX if plan loaded, FIT altitude fallback otherwise
   const terrainBuckets = fitData?.movingPowerSeries?.length
     ? bucketByTerrain(
@@ -2896,9 +2926,9 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         fitData.movingAltSeries,
         fitData.movingDistSeries,
         fitData.movingHRSeries,
-        selectedPlan?.route ?? null,
+        gpxRouteForAlign,
         athlete.ftp,
-        fitData.firstGPS ?? null
+        alignment,
       )
     : null;
   const actualMetrics = fitPowerStream.length ? (() => {
@@ -2919,36 +2949,23 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     : null;
   const actualWbal = actualWbalRaw?.chartData ?? [];
 
-  // Per-climb pacing stats — requires GPX (for climb detection) + FIT
+  // Per-climb pacing stats — requires GPX (for climb detection) + FIT.
+  // CC#8: pass `alignment` through to buildPerClimbStats. Climb membership is
+  // determined per-second from alignment[i].gpxDistM — off-route seconds are
+  // skipped so detours don't get attributed to a planned climb.
   const perClimbStats = (() => {
     const gpxStats = selectedPlan?.route ?? null;
     if (!gpxStats?.segmentGrades?.length || !fitData?.movingPowerSeries?.length) return [];
     const climbs = detectClimbs(gpxStats);
     if (!climbs.length) return [];
-    // Re-use same gpxOffsetM logic as bucketByTerrain for coordinate alignment.
-    // Bounded search per Prompt 3.5 — see comment at the matching site.
-    let gpxOffsetM = 0;
-    if (gpxStats && fitData.firstGPS) {
-      if (gpxStats._gpxPts) {
-        const haversine = (lat1, lon1, lat2, lon2) => {
-          const R = 6371000, toRad = Math.PI / 180;
-          const dLat = (lat2 - lat1) * toRad, dLon = (lon2 - lon1) * toRad;
-          const a = Math.sin(dLat/2)**2 + Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*Math.sin(dLon/2)**2;
-          return R * 2 * Math.asin(Math.sqrt(a));
-        };
-        const pts = gpxStats._gpxPts;
-        let minD = Infinity, minIdx = 0;
-        for (let i = 0; i < pts.length; i++) {
-          if (pts[i].cumDistM > DEFAULTS.gpsMatchSearchWindowM) break;
-          const d = haversine(pts[i].lat, pts[i].lon, fitData.firstGPS.lat, fitData.firstGPS.lon);
-          if (d < minD) { minD = d; minIdx = i; }
-        }
-        gpxOffsetM = minD < 2000 ? pts[minIdx].cumDistM : 0;
-      } else {
-        gpxOffsetM = fitData.firstGPS.dist ?? 0;
-      }
-    }
-    return buildPerClimbStats(climbs, fitData.movingPowerSeries, fitData.movingDistSeries, actualWbalRaw, athlete.ftp, gpxOffsetM);
+    return buildPerClimbStats(
+      climbs,
+      fitData.movingPowerSeries,
+      fitData.movingDistSeries,
+      actualWbalRaw,
+      athlete.ftp,
+      alignment,
+    );
   })();
 
   // Execution score: IF delta — 0 delta = 100%, each 0.01 IF = 2 points off, capped 0–100.

@@ -1,14 +1,33 @@
 // PLAN-side power-stream generator. Spec 4.2 orchestrator.
 //
-// **Step 6 Prompt 4A — Step 1+2 (placeholder relocation):** this file is a
-// verbatim port of the legacy buildPowerStream from App.jsx. Behavior is
-// preserved exactly. Logic changes (Groups B/C/D/E/F/G/H/I/J/K per spec 4.2)
-// will be applied in subsequent steps of Prompt 4A.
+// **Step 6 Prompt 4B — Step 2 (CC#7):** PLAN-side now resamples internally at
+// 1-second resolution to match ANALYZE side. Both sides feed canonical helpers
+// (`computeNP`, `simulateWbal`) at dt=1, eliminating the dt=60 vs dt=1
+// asymmetry that caused systematic NP/W'bal drift between predicted and
+// observed numbers on variable terrain.
 //
-// Locked output shape (Group H — non-negotiable for this prompt):
+// Implementation:
+//  • Per-second simulation along the route — each second computes target
+//    speed → grade-corrected watts → cap/floor application → actual speed
+//    → distance advance.
+//  • `powerStream` (1-min blocks) preserved for backward compatibility with
+//    chart consumers / table renderers / segment NP calculations.
+//  • `powerStreamPerSec` is the new authoritative output for canonical
+//    physics: NP via `computeNP`, W'bal via `buildWbal({ blockSeconds: 1 })`.
+//    Eager (always populated) but excluded from IndexedDB persistence by the
+//    caller — recomputed on plan load.
+//  • `displayStream` (2-min) now aggregated from per-second samples directly
+//    rather than from the 1-min blocks — finer underlying resolution flows
+//    through to chart rendering.
+//  • Module-level WeakMap caches gpxStats-derived invariants (segment grade
+//    table, bearing table, distance bin lookups) so flatIFForTargetNP's
+//    30-iteration binary search doesn't rebuild them per call.
+//
+// Locked output shape (Group H + 4B addition):
 //   {
-//     powerStream: [{time, power, pctFTP, grade, distKm, speedKph, blockTimeMin}],
-//     displayStream: [{time, power, pctFTP, grade, peakGrade, distKm, speedKph}],
+//     powerStream:        [{time, power, pctFTP, grade, distKm, speedKph, blockTimeMin}],
+//     powerStreamPerSec:  [{t, power, distM, grade}],          // CC#7 (4B)
+//     displayStream:      [{time, power, pctFTP, grade, peakGrade, distKm, speedKph}],
 //     estimatedDurationMin, avgSpeedKph, avgPower,
 //     normalizedPower, tss, ifActual, _physicsOnlyDurationMin,
 //   }
@@ -18,6 +37,7 @@ import { getSegmentIF }       from './getSegmentIF.js';
 import { gradeCategory }      from './gradeCategory.js';
 import { speedAtPower }       from './speedAtPower.js';
 import { powerAtSpeed }       from './powerAtSpeed.js';
+import { computeNP }          from './computeNP.js';
 import { fitWarn }            from './fitWarn.js';
 import { DEFAULTS }           from '../constants/defaults.js';
 import { PHYSICS_CONSTANTS }  from '../constants/physicsConstants.js';
@@ -25,14 +45,14 @@ import { PHYSICS_CONSTANTS }  from '../constants/physicsConstants.js';
 // ── Function-specific tuning constants (per CC#5) ────────────────────────
 // Behaviour decisions live at the top of their function as named constants.
 // Cross-cutting tuning (Crr, CdA, descent floors, etc.) lives in DEFAULTS.
-const WARMUP_BLOCKS         = 3;     // first N blocks ramp from start factor → 1.0
+const WARMUP_SEC            = 180;   // first N seconds ramp from start factor → 1.0 (≈3 min)
 const WARMUP_START_FACTOR   = 0.7;   // initial multiplier on target speed
-const BEARING_BUCKETS       = 200;   // GPX-side; sized to gpxStats.courseBearings
 const MIN_SPEED_MS          = 0.5;   // lower bound passed to powerAtSpeed for stability
-const WARMUP_MIN_SPEED_MS   = 0.3;   // below this speed, we cap blockTime at 1 min
+const STALL_SPEED_MS        = 0.3;   // below this we treat the second as a stall (no advance)
 const EMPTY_ROUTE_FALLBACK_MIN = 180; // when speed solver fails entirely
 const DISPLAY_BLOCK_MIN     = 2;     // chart aggregation: 2-min display blocks
-const NP_ROLLING_WINDOW_SEC = 30;    // canonical NP rolling-window length
+const DIST_BIN_M            = 100;   // distance-bin resolution for cached grade/bearing lookup
+const MAX_SIM_SEC           = 24 * 3600; // hard ceiling — guards against pathological stalls
 
 // (Prompt 4A.5: a `CLIMB_GRADE_THRESHOLD_PCT = 3` constant was previously
 // declared here and used as the cap-application gate. It was misleadingly
@@ -41,6 +61,47 @@ const NP_ROLLING_WINDOW_SEC = 30;    // canonical NP rolling-window length
 // "which blocks get a cap." Removed in 4A.5. Caps now route through
 // `gradeCategory` per spec 2.6 / 4.2 Group C — every non-descent block
 // receives its category's cap, regardless of how shallow the grade is.)
+
+// ── CC#7 memoization (Prompt 4B Step 2) ─────────────────────────────────
+// Cache per-`gpxStats` invariants: segment grade table, bearing table, and
+// per-100m distance-binned grade/bearing lookup arrays. WeakMap keyed off the
+// gpxStats object reference — flatIFForTargetNP's 30-iteration binary search
+// hits the cache on iterations 2+ since gpxStats is identity-stable across
+// calls. Cache automatically released when gpxStats is GC'd.
+const _gpxCache = new WeakMap();
+
+function getGpxBins(gpxStats) {
+  const cached = _gpxCache.get(gpxStats);
+  if (cached) return cached;
+
+  const totalDistM = gpxStats.totalDistKm * 1000;
+  const avgGrade = totalDistM > 0
+    ? (gpxStats.elevGainM - gpxStats.elevLossM) / totalDistM : 0;
+  const segs = gpxStats.segmentGrades && gpxStats.segmentGrades.length > 0
+    ? gpxStats.segmentGrades : [{ distM: totalDistM, gradeDecimal: avgGrade }];
+  const courseBearings = gpxStats.courseBearings || [];
+  const avgBearing = gpxStats.avgCourseBearing || 0;
+
+  const nBins = Math.max(1, Math.ceil(totalDistM / DIST_BIN_M));
+  const gradeBins = new Float32Array(nBins);
+  const bearingBins = new Float32Array(nBins);
+  for (let b = 0; b < nBins; b++) {
+    const startM = b * DIST_BIN_M;
+    const endM = Math.min(startM + DIST_BIN_M, totalDistM);
+    gradeBins[b] = gradeForSlice(segs, startM, endM);
+    bearingBins[b] = courseBearings.length > 0
+      ? (courseBearings[Math.min(
+          courseBearings.length - 1,
+          Math.floor((b / nBins) * courseBearings.length),
+        )] ?? avgBearing)
+      : avgBearing;
+  }
+
+  const result = { totalDistM, avgGrade, segs, courseBearings, avgBearing,
+                   nBins, gradeBins, bearingBins };
+  _gpxCache.set(gpxStats, result);
+  return result;
+}
 
 /**
  * Grade-dependent descent floor (spec 4.2 Group B).
@@ -85,227 +146,239 @@ export function buildPowerStream(
   windDirDeg  = 270,
   climbCategories = null,
 ) {
+  // Prompt 4B precondition (replaces the legacy FTP×2 fallback ceiling).
+  // Caller must always pass climbCategories — App.jsx auto-restores defaults
+  // before calling per the Group C / 4A.5 design. Returning a structured
+  // error here surfaces any future caller bug (or refactor regression) via
+  // the _physicsUnwrap → fitWarn console path.
+  if (!climbCategories) {
+    return { ok: false, reason: 'climb_categories_required' };
+  }
+
   const totalMass = athlete.weight + bikeWeight;
-  const totalDistM = gpxStats.totalDistKm * 1000;
-  const avgGrade = totalDistM > 0
-    ? (gpxStats.elevGainM - gpxStats.elevLossM) / totalDistM : 0;
 
-  const segs = gpxStats.segmentGrades && gpxStats.segmentGrades.length > 0
-    ? gpxStats.segmentGrades : [{ distM: totalDistM, gradeDecimal: avgGrade }];
+  // Pull cached gpxStats-derived bins (built once per gpxStats reference).
+  const { totalDistM, gradeBins, bearingBins, nBins, avgBearing } = getGpxBins(gpxStats);
 
-  // Per-block bearing array from GPX (200 buckets). Falls back to avgCourseBearing or 0.
-  const courseBearings = gpxStats.courseBearings || [];
-  const avgBearing = gpxStats.avgCourseBearing || 0;
-  // Compute headwind component for a given course bearing
+  // Compute headwind component for a given course bearing.
   const headwindForBearing = (bearing) => {
     if (windSpeedMs === 0) return 0;
     const diff = ((windDirDeg - bearing) * Math.PI) / 180;
     return windSpeedMs * Math.cos(diff);
   };
 
-
-  // Determine base IF and target duration
+  // Determine base IF.
   const baseIF = pacingStrategy.mode === "constant_if"
     ? pacingStrategy.targetIF
     : (pacingStrategy.segments?.[0]?.targetIF ?? 0.75);
 
-  // Flat-road speed at target IF — this is the reference speed the rider targets.
-  // Duration is computed from this, matching estimateDuration exactly.
-  const avgHeadwind = headwindForBearing(avgBearing);
-  const flatWatts = baseIF * athlete.ftp;
-  // Duration estimate uses zero-wind flat speed for stable block-count sizing
-  // regardless of wind input. Per-block math below applies wind correctly.
-  const flatSpeed = _unwrap(speedAtPower(flatWatts, 0, totalMass, Crr, CdA, eta, rho, 0));
-  const durationMin = flatSpeed > 0.1 ? (totalDistM / flatSpeed) / 60 : EMPTY_ROUTE_FALLBACK_MIN;
+  // ── Per-second simulation (CC#7) ───────────────────────────────────────
+  // Walk the route second-by-second. Each second:
+  //   1. Look up grade & bearing for current distance bin.
+  //   2. Compute target flat-road speed (with wind) for current segIF.
+  //   3. Apply warmup ramp.
+  //   4. Compute grade-corrected watts to hold target speed.
+  //   5. Apply descent floor / climb cap routing (spec 4.2 Group B + C).
+  //   6. Solve actual speed at clamped watts on this grade with wind.
+  //   7. Advance distance by speed*1sec; record sample.
+  const perSec = [];
+  let s = 0;       // distance traveled (m)
+  let t = 0;       // time elapsed (sec)
+  let stalled = false;
 
-  // If a power ceiling is active, the ride will be slower than flatSpeed predicts.
-  const effectiveWatts = Math.min(maxPower, baseIF * athlete.ftp);
-  const effectiveFlatSpeed = _unwrap(speedAtPower(effectiveWatts, 0, totalMass, Crr, CdA, eta, rho, 0));
-  const durationEstimate = effectiveFlatSpeed > 0.1 ? (totalDistM / effectiveFlatSpeed) / 60 : EMPTY_ROUTE_FALLBACK_MIN;
+  while (s < totalDistM && t < MAX_SIM_SEC) {
+    const bin = Math.min(nBins - 1, Math.floor(s / DIST_BIN_M));
+    const grade = gradeBins[bin];
+    const bearing = bearingBins[bin] ?? avgBearing;
+    const headwind = headwindForBearing(bearing);
+    const progress = totalDistM > 0 ? (s / totalDistM) : 0;
 
-  // Build 1-min blocks for physics accuracy. At 1-min resolution, short punchy climbs
-  // appear as distinct distance slices and the climb floor fires on actual GPX grades
-  // rather than averaged-away 5-min grades. Each block covers a proportional distance slice.
-  const blocks = Math.max(1, Math.ceil(durationEstimate / 1));
-  const distPerBlock = totalDistM / blocks; // meters per 1-min block
-  const powerStream = [];
-  let actualDurationMin = 0;
-
-  for (let i = 0; i < blocks; i++) {
-    const blockStartM = i * distPerBlock;
-    const blockEndM = blockStartM + distPerBlock;
-    const grade = gradeForSlice(segs, blockStartM, blockEndM);
-
-    // Warmup: first WARMUP_BLOCKS ramp from WARMUP_START_FACTOR to 100% of
-    // target speed. Applied ONCE to targetSpeed only — gradeWatts derives
-    // from that reduced speed, so warmup is already captured. Do NOT
-    // multiply blockWatts by warmupFactor again.
-    const warmupFactor = i < WARMUP_BLOCKS
-      ? WARMUP_START_FACTOR + (i / WARMUP_BLOCKS) * (1 - WARMUP_START_FACTOR)
-      : 1.0;
     const segIF = pacingStrategy.mode === "segments"
-      ? _unwrap(getSegmentIF(pacingStrategy.segments, blockStartM / totalDistM), baseIF)
+      ? _unwrap(getSegmentIF(pacingStrategy.segments, progress), baseIF)
       : baseIF;
 
-    // Map 1-min block index proportionally to the 200-bucket GPX bearing array.
-    const bearingIdx = courseBearings.length > 0
-      ? Math.min(courseBearings.length - 1, Math.floor(i / blocks * courseBearings.length))
-      : 0;
-    const blockBearing = courseBearings.length > 0 ? (courseBearings[bearingIdx] ?? avgBearing) : avgBearing;
-    const blockHeadwind = headwindForBearing(blockBearing);
+    // Warmup: first WARMUP_SEC seconds ramp from WARMUP_START_FACTOR → 1.0.
+    // Applied ONCE to targetSpeed only — gradeWatts derives from that reduced
+    // speed, so warmup is already captured. Do NOT multiply blockWatts again.
+    const warmupFactor = t < WARMUP_SEC
+      ? WARMUP_START_FACTOR + (t / WARMUP_SEC) * (1 - WARMUP_START_FACTOR)
+      : 1.0;
 
-    // Group E (spec 4.2): wind is included in target speed.
-    // Rationale: real athletes hold power into headwinds and accept slower
-    // speed rather than burning matches to maintain no-wind speed. The
-    // "constant-speed pacing" model (Decision Log) is preserved with the
-    // amendment that the rider's "constant speed" is conditioned on the
-    // current wind, not the no-wind baseline. Behavior change: predicted
-    // durations on windy routes shift longer (validated in Section 5).
+    // Group E (spec 4.2): wind included in target speed.
     const targetSpeed = _unwrap(
-      speedAtPower(segIF * athlete.ftp, 0, totalMass, Crr, CdA, eta, rho, blockHeadwind)
+      speedAtPower(segIF * athlete.ftp, 0, totalMass, Crr, CdA, eta, rho, headwind)
     ) * warmupFactor;
 
-    // Power required to hold targetSpeed on this block's grade WITH wind.
+    // Power required to hold targetSpeed on this second's grade WITH wind.
     const gradeWatts = powerAtSpeed(
-      Math.max(MIN_SPEED_MS, targetSpeed), grade, totalMass, Crr, CdA, eta, rho, blockHeadwind
+      Math.max(MIN_SPEED_MS, targetSpeed), grade, totalMass, Crr, CdA, eta, rho, headwind
     );
 
-    // Apply category-based climb power (min/max) if grade qualifies.
-    // Categories take full precedence over global ceiling on climb blocks.
-    // Global maxPower ceiling applies only to blocks where the grade demands
-    // MORE than flat-road effort — i.e. actual hard efforts, not descents.
-    // Applying the ceiling on descents (where gradeWatts > flatWatts because
-    // the rider is trying to hold pace downhill) distorts NP calculation and
-    // causes the back-solver to over-compensate, producing paradoxically faster
-    // times with a ceiling than without.
-    const gradePct = grade * 100;
-    const flatWattsForBlock = segIF * athlete.ftp;
-    let blockFloor = 0;
-    // Group D (spec 4.2): ceiling applies uniformly. The legacy
-    // effort-block-only asymmetry was a hack to compensate for the legacy
-    // 20/60W flat descent floor distorting NP on descents. With Group B's
-    // realistic grade-dependent descent floors, the asymmetry isn't needed
-    // — descent power stays well below ftp×2 naturally. The maxPower
-    // ceiling now applies to every block; the ftp×2 fallback ceiling is
-    // still here as a safety net but goes away when search-with-caps lands
-    // (Step 9 of Prompt 4A).
-    let blockCeiling = Math.min(maxPower, athlete.ftp * 2);
-
     // Floor / ceiling routing per spec 4.2 Groups B + C, fixed in 4A.5.
-    // `gradeCategory` (spec 2.6) is the canonical per-block classifier:
+    // `gradeCategory` (spec 2.6) is the canonical per-second classifier:
     //   gradePct < 0       → 'descent'   (Group B grade-dependent floor)
     //   0 ≤ gradePct < 6   → 'moderate'  (Group C cap from climbCategories)
     //   6 ≤ gradePct < 10  → 'steep'
     //   gradePct ≥ 10      → 'wall'
-    // Caps apply uniformly across non-descent blocks — every block ≥ 0%
-    // grade gets the corresponding category cap, regardless of whether the
-    // grade is shallow enough that `detectClimbs` would skip it as a named
-    // climb. The 3% threshold belongs to route-topology classification, not
-    // per-block effort budgeting.
+    const gradePct = grade * 100;
+    const flatWattsForSec = segIF * athlete.ftp;
+    let secFloor = 0;
+    let secCeiling = maxPower;
+
     if (gradePct < 0) {
-      // Group B descent floor — no climb cap on descents.
-      blockFloor = descentFloorWatts(gradePct, flatWattsForBlock, athlete.ftp);
-    } else if (climbCategories) {
-      // Group C climb cap. When climbCategories is provided, caps are
-      // mandatory (pre-populated at race creation, auto-restored on user-
-      // clear by computePlan in App.jsx). A missing or zero `max` is a bug
-      // indicator — surface via _physicsUnwrap → fitWarn console path.
+      secFloor = descentFloorWatts(gradePct, flatWattsForSec, athlete.ftp);
+    } else {
       const cat = gradeCategory(gradePct);
       const catSettings = climbCategories[cat];
       if (!catSettings || !(catSettings.max > 0)) {
         return { ok: false, reason: 'climb_cap_unset', detail: { category: cat, gradePct } };
       }
-      blockCeiling = catSettings.max;
-      if (catSettings.min > 0) blockFloor = catSettings.min;
+      secCeiling = Math.min(secCeiling, catSettings.max);
+      if (catSettings.min > 0) secFloor = catSettings.min;
     }
-    // When climbCategories is null (legacy callers — none in current flow
-    // post-Prompt 4A), the legacy `min(maxPower, ftp×2)` fallback ceiling
-    // applies via blockCeiling above. Defensive code path; effectively dead
-    // in normal flow.
-    // Clamp gradeWatts to the resolved floor/ceiling. The legacy 60W literal
-    // is gone — descent floor handles the descent case; climb caps the climb
-    // case; flat blocks fall back to gradeWatts naturally.
-    const blockWatts = Math.round(Math.min(blockCeiling, Math.max(blockFloor, gradeWatts)));
+
+    const watts = Math.round(Math.min(secCeiling, Math.max(secFloor, gradeWatts)));
 
     // Actual speed WITH wind — headwind slows you, tailwind helps.
-    const speed = _unwrap(speedAtPower(blockWatts, grade, totalMass, Crr, CdA, eta, rho, blockHeadwind));
-    const blockTimeMin = speed > WARMUP_MIN_SPEED_MS ? (distPerBlock / speed) / 60 : 1;
-    const speedKph = Math.round(speed * 3.6 * 10) / 10;
+    const speed = _unwrap(speedAtPower(watts, grade, totalMass, Crr, CdA, eta, rho, headwind));
+    const ds = speed > STALL_SPEED_MS ? speed : 0;
 
+    perSec.push({
+      t,
+      power: watts,
+      distM: s,
+      grade,
+      speedMs: speed,
+    });
+
+    s += ds;
+    t += 1;
+    if (ds <= 0) {
+      // Stalled (sub-stall speed) — break to avoid infinite loop. Should be
+      // rare; indicates either climb-cap-set-too-low + steep-grade or a bug.
+      stalled = true;
+      break;
+    }
+  }
+
+  // Fallback if simulation degenerated (no samples produced).
+  const totalSec = perSec.length;
+  if (totalSec === 0) {
+    return {
+      powerStream: [],
+      powerStreamPerSec: [],
+      displayStream: [],
+      estimatedDurationMin: EMPTY_ROUTE_FALLBACK_MIN,
+      avgSpeedKph: 0,
+      avgPower: 0,
+      normalizedPower: 0,
+      tss: 0,
+      ifActual: 0,
+      _physicsOnlyDurationMin: EMPTY_ROUTE_FALLBACK_MIN,
+    };
+  }
+  if (stalled) {
+    fitWarn('build_power_stream_stalled',
+      'buildPowerStream halted on stall — climb cap may be infeasibly low for grade.',
+      { atDistM: s, totalDistM, atSec: t });
+  }
+
+  const actualDurationMin = totalSec / 60;
+
+  // ── Aggregate per-second → 1-min powerStream (legacy contract) ────────
+  // Charts, segment-NP code, and the per-block table consume this shape.
+  // 1-min blocks formed by averaging 60 consecutive per-second samples.
+  const powerStream = [];
+  const numBlocks = Math.ceil(totalSec / 60);
+  let cumMin = 0;
+  for (let b = 0; b < numBlocks; b++) {
+    const start = b * 60;
+    const end = Math.min(start + 60, totalSec);
+    const slice = perSec.slice(start, end);
+    if (slice.length === 0) break;
+    const avgP = Math.round(slice.reduce((a, p) => a + p.power, 0) / slice.length);
+    const avgGrade = slice.reduce((a, p) => a + p.grade, 0) / slice.length;
+    const avgSpeedMs = slice.reduce((a, p) => a + p.speedMs, 0) / slice.length;
+    const blockTimeMin = slice.length / 60;
     powerStream.push({
-      time: Math.round(actualDurationMin),
-      power: blockWatts,
-      pctFTP: blockWatts / athlete.ftp,
-      grade: Math.round(grade * 1000) / 10,
-      distKm: Math.round(blockStartM / 100) / 10,
-      speedKph,
+      time: Math.round(cumMin),
+      power: avgP,
+      pctFTP: avgP / athlete.ftp,
+      grade: Math.round(avgGrade * 1000) / 10,    // %, 1 decimal
+      distKm: Math.round(slice[0].distM / 100) / 10,
+      speedKph: Math.round(avgSpeedMs * 3.6 * 10) / 10,
       blockTimeMin,
     });
-    actualDurationMin += blockTimeMin;
+    cumMin += blockTimeMin;
   }
 
-  // NP: 30-second rolling average then 4th-power mean.
-  // At 1-min blocks, window = ceil(30/60) = 1 block. Finer terrain resolution now feeds
-  // into the 4th-power mean, producing more accurate NP on variable terrain.
-  const rollingWindow = Math.max(1, Math.ceil(NP_ROLLING_WINDOW_SEC / (actualDurationMin / blocks * 60)));
-  const blockPowers = powerStream.map(p => p.power);
-  const rollingAvgs = blockPowers.map((_, i) => {
-    const window = blockPowers.slice(Math.max(0, i - rollingWindow + 1), i + 1);
-    return window.reduce((s, p) => s + p, 0) / window.length;
-  });
-  const normalizedPower = Math.round(Math.pow(
-    rollingAvgs.reduce((s, p) => s + Math.pow(p, 4), 0) / rollingAvgs.length,
-    0.25
-  ));
-  // Duration-weighted avg power, excluding zero-power blocks. Matches Garmin's
-  // convention (zeros from coasting excluded) and the ANALYZE-side calculation,
-  // making PLAN and ACTUAL directly comparable. Simple unweighted mean previously
-  // under-counted hard climb time (long, high-power blocks) and over-counted fast
-  // descent time (short, low-power blocks).
-  const activeBlocks = powerStream.filter(p => p.power > 0);
-  const totalActiveTime = activeBlocks.reduce((s, p) => s + p.blockTimeMin, 0);
-  const avgPower = totalActiveTime > 0
-    ? Math.round(activeBlocks.reduce((s, p) => s + p.power * p.blockTimeMin, 0) / totalActiveTime)
-    : 0;
-  const ifActual = Math.round((normalizedPower / athlete.ftp) * 100) / 100;
-  const tss = Math.round((actualDurationMin / 60) * ifActual * ifActual * 100);
-
-  // Build display stream by aggregating DISPLAY_BLOCK_MIN-wide groups of 1-min blocks.
-  // Charts render displayStream; all physics (NP, W'bal, climb floor, nutrition) uses powerStream.
+  // ── Aggregate per-second → 2-min displayStream (chart only) ────────────
   const displayStream = [];
-  for (let i = 0; i < powerStream.length; i += DISPLAY_BLOCK_MIN) {
-    const slice = powerStream.slice(i, i + DISPLAY_BLOCK_MIN);
-    // Duration-weighted, exclude zeros — same convention as headline avgPower above.
+  for (let b = 0; b < numBlocks; b += DISPLAY_BLOCK_MIN) {
+    const start = b * 60;
+    const end = Math.min(start + DISPLAY_BLOCK_MIN * 60, totalSec);
+    const slice = perSec.slice(start, end);
+    if (slice.length === 0) break;
+    // Convention C: avg includes coasting zeros — match NP timeline.
+    // (Same convention as legacy displayStream; preserved for chart parity.)
     const sliceActive = slice.filter(p => p.power > 0);
-    const sliceActiveTime = sliceActive.reduce((s, p) => s + p.blockTimeMin, 0);
-    const avgDisplayPower = sliceActiveTime > 0
-      ? Math.round(sliceActive.reduce((s, p) => s + p.power * p.blockTimeMin, 0) / sliceActiveTime)
+    const avgDisplayPower = sliceActive.length > 0
+      ? Math.round(sliceActive.reduce((a, p) => a + p.power, 0) / sliceActive.length)
       : 0;
-    const peakGrade = Math.max(...slice.map(p => p.grade));
-    // S1-FOLLOWUP: grade and speed averaging left as simple means by design — revisit later.
-    const avgGrade = Math.round(slice.reduce((s, p) => s + p.grade, 0) / slice.length * 10) / 10;
-    const avgSpeed = Math.round(slice.reduce((s, p) => s + p.speedKph, 0) / slice.length * 10) / 10;
+    const peakGradeDecimal = slice.reduce((a, p) => Math.max(a, p.grade), -Infinity);
+    const avgGradeDecimal = slice.reduce((a, p) => a + p.grade, 0) / slice.length;
+    const avgSpeedMs = slice.reduce((a, p) => a + p.speedMs, 0) / slice.length;
     displayStream.push({
-      time: slice[0].time,
+      time: b,
       power: avgDisplayPower,
       pctFTP: avgDisplayPower / athlete.ftp,
-      grade: avgGrade,
-      peakGrade: Math.round(peakGrade * 10) / 10,
-      distKm: slice[0].distKm,
-      speedKph: avgSpeed,
+      grade: Math.round(avgGradeDecimal * 1000) / 10,
+      peakGrade: Math.round(peakGradeDecimal * 1000) / 10,
+      distKm: Math.round(slice[0].distM / 100) / 10,
+      speedKph: Math.round(avgSpeedMs * 3.6 * 10) / 10,
     });
   }
 
+  // ── Final metrics from per-second stream (canonical) ──────────────────
+  // NP via canonical computeNP (CC#1) — 30-sec rolling, 4th-power mean.
+  // avg via duration-weighted moving timeline (zeros excluded — Garmin/Strava
+  // convention; the active-only filter matches the legacy 1-min behavior and
+  // ANALYZE-side avgPower calculation, keeping PLAN/ACTUAL directly
+  // comparable).
+  const powersPerSec = perSec.map(p => p.power);
+  const normalizedPower = computeNP(powersPerSec);
+  const activePowers = powersPerSec.filter(p => p > 0);
+  const avgPower = activePowers.length > 0
+    ? Math.round(activePowers.reduce((a, p) => a + p, 0) / activePowers.length)
+    : 0;
+  const ifActual = athlete.ftp > 0
+    ? Math.round((normalizedPower / athlete.ftp) * 100) / 100
+    : 0;
+  const tss = Math.round((actualDurationMin / 60) * ifActual * ifActual * 100);
+
+  // ── Per-second output (CC#7 canonical) ────────────────────────────────
+  // Slim shape — only fields downstream consumers need (W'bal at dt=1, NP
+  // recompute, future align-FIT-to-plan diff). Keeping it slim minimizes
+  // memory pressure (a 5-hour ride = 18000 entries).
+  const powerStreamPerSec = perSec.map(p => ({
+    t: p.t,                 // seconds (canonical)
+    time: p.t / 60,         // minutes — preserves WbalChart `pt.time` contract
+    power: p.power,
+    distM: p.distM,
+    distKm: Math.round(p.distM / 100) / 10,
+    grade: Math.round(p.grade * 1000) / 10,  // % w/ 1 decimal — chart contract
+  }));
+
   return {
-    powerStream,      // 1-min blocks — NP, W'bal, nutrition physics
-    displayStream,    // 2-min aggregates — charts only
+    powerStream,           // 1-min blocks — legacy chart/table consumers
+    powerStreamPerSec,     // 1-sec stream — canonical math (CC#7)
+    displayStream,         // 2-min aggregates — charts only
     estimatedDurationMin: Math.round(actualDurationMin),
     avgSpeedKph: Math.round((gpxStats.totalDistKm / (actualDurationMin / 60)) * 10) / 10,
     avgPower,
     normalizedPower,
     tss,
     ifActual,
-    // VI correction — caller must pass surfaceMix separately; stored here for display
     _physicsOnlyDurationMin: Math.round(actualDurationMin),
   };
 }

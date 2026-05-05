@@ -81,15 +81,10 @@ export const DEFAULTS = Object.freeze({
    *  as a real stop (filters traffic-light slowdowns from accumulating). */
   stopMinDurationSec: 5,
 
-  // ── FIT→GPX initial-position matching (legacy gpxOffsetM model) ───────
-  /** Maximum cumulative-distance window into the GPX route to search for
-   *  the closest match to the FIT file's first GPS coordinate. Protects
-   *  loop courses (where the route's last point is geographically near the
-   *  start) from collapsing the offset to ~routeLen instead of ~0.
-   *
-   *  2 km matches the existing 2 km acceptance threshold in the same code
-   *  path and stays safely below any realistic loop circumference. The
-   *  whole `gpxOffsetM` model is slated for replacement by `alignFitToGpx`
-   *  per CC#8 in Prompt 4, at which point this constant goes away too. */
-  gpsMatchSearchWindowM: 2000,
+  // (CC#8 / Prompt 4B Step 5: the legacy `gpsMatchSearchWindowM` constant
+  //  was removed. `alignFitToGpx` is now the canonical FIT-to-GPX coordinate
+  //  bridge — per-second nearest-neighbor over the full route, with on/off-
+  //  route classification at OFF_ROUTE_THRESHOLD_M. Loop-course start/end
+  //  ambiguity is handled by per-point alignment rather than a single
+  //  bounded-search match at the FIT start.)
 });

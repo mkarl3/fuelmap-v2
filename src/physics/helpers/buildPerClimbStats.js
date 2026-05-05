@@ -1,17 +1,20 @@
 // Per-climb actual ride statistics — NP, avg power, % FTP, W'bal at exit —
 // for every climb detected by `detectClimbs`.
 //
+// **CC#8 (Prompt 4B Step 5):** climb attribution model migrated from the
+// legacy single-point `gpxOffsetM` constant offset to per-second
+// `alignFitToGpx` alignment. Each FIT moving second is mapped onto the GPX
+// route by nearest-neighbor GPS; off-route seconds are excluded from climb
+// membership rather than smeared across the planned route. The legacy
+// constant-offset model broke whenever the rider deviated from the route
+// (closed roads, course changes, off-course detours).
+//
 // Per spec 3.7 target state changes from legacy:
 //  • NP routes through canonical `computeNP` (CC#1) — eliminates one of the
 //    duplicated NP sites from the cross-cutting audit.
 //  • 20-second filter lifted to named constant `MIN_CLIMB_SECONDS_FOR_STATS`.
 //  • Climbs with 0 FIT data → null (filtered out by caller) + fitWarn.
 //  • Field rename: `peakGrade` → `peakGradePct` (spec 2.6 split).
-//
-// **Climb attribution model:** legacy `gpxOffsetM` single-point offset
-// preserved. CC#8 (per-second GPS alignment via `alignFitToGpx`) lands in
-// Prompt 4 — for now the constant-offset assumption holds. `alignFitToGpx`
-// is exported from the physics module but not yet consumed here.
 //
 // **Performance:** linear scan retained per spec. Profile in Step 6 if
 // measured slow before adding binary search / spatial index.
@@ -35,10 +38,20 @@ const MIN_CLIMB_SECONDS_FOR_STATS = 20;
  *   with any in-flight migration; once detectClimbs is fully migrated, the
  *   fallback can be removed.
  * @param {number[]} movingPowerSeries
- * @param {number[]} movingDistSeries  per-second distance delta (m)
+ * @param {number[]} movingDistSeries  per-second distance delta (m) — used
+ *   only as a legacy fallback when `alignment` is unavailable
  * @param {object | null} actualWbalRaw output of buildWbalFromRawSeries
  * @param {number} ftp
- * @param {number} [gpxOffsetM=0]      legacy single-point offset model
+ * @param {Array<{onRoute: boolean, gpxDistM: number | null, fitDistM: number}> | null} alignment
+ *   Per-moving-second alignment from `alignFitToGpx` (CC#8). Length must
+ *   match `movingPowerSeries` length. When provided, climb membership is
+ *   determined by `alignment[i].gpxDistM` (with on-route filter); off-route
+ *   seconds are excluded.
+ *   When null/missing (legacy save without movingGPSPath, or no _gpxPts on
+ *   the GPX route), falls back to cumulative-FIT-distance attribution with
+ *   zero offset — same shape as the constant-offset model with offset=0,
+ *   which is incorrect on most real rides but the only thing we can do
+ *   without GPS data. fitWarn fires so the caller can surface the issue.
  * @returns {Array<{
  *   climbId, category, startDistKm, lengthKm, avgGrade, peakGradePct,
  *   np, avgP, pctFTP, wbalPctAtExit, secondsInClimb,
@@ -48,16 +61,33 @@ const MIN_CLIMB_SECONDS_FOR_STATS = 20;
  *   issues are visible during debugging.
  */
 export function buildPerClimbStats(climbs, movingPowerSeries, movingDistSeries,
-                                    actualWbalRaw, ftp, gpxOffsetM = 0) {
+                                    actualWbalRaw, ftp, alignment = null) {
   if (!climbs?.length || !movingPowerSeries?.length || !movingDistSeries?.length) return [];
 
-  // Build cumulative-distance array from per-second deltas, offset-adjusted
-  // so it starts at gpxOffsetM (matching terrain stream coordinate frame).
-  const cumDist = new Float32Array(movingDistSeries.length);
-  let acc = gpxOffsetM;
-  for (let i = 0; i < movingDistSeries.length; i++) {
-    acc += movingDistSeries[i];
-    cumDist[i] = acc;
+  const n = movingPowerSeries.length;
+  const hasAlignment = Array.isArray(alignment) && alignment.length === n;
+
+  // Per-second GPX distance lookup. Two paths:
+  //   (1) CC#8 alignment available → on-route seconds map via alignment[i].gpxDistM,
+  //       off-route seconds get NaN (excluded from climb membership).
+  //   (2) Legacy fallback → cumulative-FIT-distance with zero offset. Imperfect
+  //       (rider's FIT 0m may not be route 0m) but matches the prior behavior
+  //       when neither alignment nor _gpxPts were available.
+  const gpxDistAtSec = new Float64Array(n);
+  if (hasAlignment) {
+    for (let i = 0; i < n; i++) {
+      const a = alignment[i];
+      gpxDistAtSec[i] = (a && a.onRoute && a.gpxDistM != null) ? a.gpxDistM : NaN;
+    }
+  } else {
+    fitWarn('per_climb_no_alignment',
+      'buildPerClimbStats called without alignment — using zero-offset cumulative FIT distance fallback',
+      { climbCount: climbs.length });
+    let acc = 0;
+    for (let i = 0; i < n; i++) {
+      acc += movingDistSeries[i] || 0;
+      gpxDistAtSec[i] = acc;
+    }
   }
 
   // Per-second W'bal interpolated from 1-min chartData.
@@ -77,16 +107,15 @@ export function buildPerClimbStats(climbs, movingPowerSeries, movingDistSeries,
     const startM = climb.startDistKm * 1000;
     const endM   = startM + climb.lengthKm * 1000;
 
-    // Collect power seconds within this climb's distance window.
-    // For computeNP we need the FULL contiguous slice (zeros included) so
-    // the 30-second rolling window operates on real time. The legacy
-    // implementation filtered zeros before computing NP, which is wrong
-    // for the rolling-window method per CC#1 — we don't replicate that.
+    // Collect power seconds within this climb's distance window. Off-route
+    // seconds (gpxDistAtSec[i] === NaN) are excluded — NaN comparisons are
+    // false on both sides of the window, so they fall through naturally.
     const powersForNP = [];
-    const powersForAvg = []; // exclude zeros to match user expectation of "avg"
+    const powersForAvg = [];
     let lastSecInClimb = -1;
-    for (let i = 0; i < cumDist.length; i++) {
-      if (cumDist[i] >= startM && cumDist[i] <= endM) {
+    for (let i = 0; i < n; i++) {
+      const d = gpxDistAtSec[i];
+      if (d >= startM && d <= endM) {
         const p = movingPowerSeries[i];
         powersForNP.push(p);
         if (p > 0) powersForAvg.push(p);
@@ -113,7 +142,7 @@ export function buildPerClimbStats(climbs, movingPowerSeries, movingDistSeries,
       startDistKm:  climb.startDistKm,
       lengthKm:     climb.lengthKm,
       avgGrade:     climb.avgGrade,
-      peakGradePct: climb.peakGradePct ?? climb.peakGrade ?? 0, // accept either field during migration
+      peakGradePct: climb.peakGradePct ?? climb.peakGrade ?? 0,
       np, avgP, pctFTP,
       wbalPctAtExit,
       secondsInClimb,
@@ -123,14 +152,31 @@ export function buildPerClimbStats(climbs, movingPowerSeries, movingDistSeries,
 
 // ─── Sanity checks ───────────────────────────────────────────────────────
 //
-// Two synthetic climbs, one with valid FIT data, one with none:
+// CC#8 — alignment-driven attribution. Two synthetic climbs at distinct route
+// distances; FIT has 60s of valid GPS, all on-route around climb #1's window:
 //   const climbs = [
-//     { id: 1, category: 'moderate', startDistKm: 0, lengthKm: 1, avgGrade: 5, peakGradePct: 7 },
+//     { id: 1, category: 'moderate', startDistKm: 0.5, lengthKm: 1, avgGrade: 5, peakGradePct: 7 },
 //     { id: 2, category: 'steep',    startDistKm: 100, lengthKm: 1, avgGrade: 8, peakGradePct: 12 },
 //   ];
-//   60 seconds × 1m/s = 60m, can't reach the second climb at 100km.
-//   buildPerClimbStats(climbs, Array(60).fill(250), Array(60).fill(1), null, 250)
-//   → [ { climbId: 1, np: 250, avgP: 250, pctFTP: 100, secondsInClimb: 60, ... } ]
-//   → climb 2 filtered out (no FIT data — fires climb_no_fit_data warning)
+//   const power = Array(60).fill(250);
+//   const dist  = Array(60).fill(1);
+//   const alignment = power.map((_, i) => ({
+//     onRoute: true, gpxDistM: 500 + i * 16, fitDistM: i * 1,   // sweeps 500–1444 m
+//   }));
+//   buildPerClimbStats(climbs, power, dist, null, 250, alignment)
+//   → [ { climbId: 1, np: 250, avgP: 250, pctFTP: 100, secondsInClimb: ~31, ... } ]
+//   → climb 2 filtered out (no FIT seconds at 100 km)
+//
+// Off-route filtering: half of FIT seconds are off-route — those should be
+// excluded from climb membership:
+//   const alignment2 = power.map((_, i) => ({
+//     onRoute: i % 2 === 0, gpxDistM: i % 2 === 0 ? 500 + i * 16 : null, fitDistM: i,
+//   }));
+//   → climb 1 secondsInClimb halves vs the all-on-route case.
+//
+// Legacy fallback (no alignment): falls back to cumulative-FIT-distance
+// attribution with offset 0. Fires per_climb_no_alignment warn:
+//   buildPerClimbStats(climbs, power, dist, null, 250)
+//   → climb 1 found at 0.5–1.5 km; climb 2 still missing.
 
 export default buildPerClimbStats;

@@ -31,6 +31,7 @@
 //     // ── New additive fields (forward compatibility) ─────────────────
 //     movingCadenceSeries: (number|null)[],
 //     movingTempSeries:    (number|null)[],   // °C
+//     movingGPSPath:       ({ lat, lon, distM } | null)[],   // CC#8: parallel to moving* series
 //     fullGPSPath:         { lat, lon, distM, timestamp }[],
 //     laps:                { startTimeMs, endTimeMs, distM, avgPower? }[],
 //     hasPower:            boolean,
@@ -292,6 +293,12 @@ export async function parseFIT(buffer) {
   const movingHRSeries      = [];
   const movingCadenceSeries = [];
   const movingTempSeries    = [];
+  // CC#8 (Prompt 4B Step 5): per-moving-second GPS path. One entry per moving
+  // second, parallel to all other moving* series so downstream consumers can
+  // index uniformly. Entry is `{lat, lon, distM}` when the FIT record at that
+  // second had valid GPS, otherwise `null`. `alignFitToGpx` accepts this shape
+  // directly; off-route / no-fix seconds appear as `null`s in the output.
+  const movingGPSPath       = [];
   let prevDistM = null;
   for (let t = 0; t <= elapsedSec; t++) {
     if (stoppedOffsets.has(t)) continue;
@@ -308,6 +315,12 @@ export async function parseFIT(buffer) {
       movingDistSeries.push(0);
     }
     if (distM !== null) prevDistM = distM;
+    // GPS for this moving second (null if no fix or non-position record).
+    if (r && r.lat !== null && r.lon !== null) {
+      movingGPSPath.push({ lat: r.lat, lon: r.lon, distM: distM ?? 0 });
+    } else {
+      movingGPSPath.push(null);
+    }
   }
 
   // ── Aggregate ride metrics — both on the moving timeline ─────────────────
@@ -424,6 +437,7 @@ export async function parseFIT(buffer) {
     // New additive fields
     movingCadenceSeries,
     movingTempSeries,
+    movingGPSPath,                 // CC#8: per-moving-second GPS, parallel to moving* series
     fullGPSPath,
     laps,
     hasPower: hasAnyPower,
