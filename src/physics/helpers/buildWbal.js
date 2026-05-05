@@ -70,7 +70,12 @@ export function buildWbal(powerStream, athlete, options) {
   return powerStream.map((pt, i) => ({
     ...pt,
     wbal:    Math.round(wbalSeries[i]),
-    wbalPct: Math.round((wbalSeries[i] / wPrime) * 100),
+    // 4B.5: float, not rounded. Per-second W' changes are often <1%/sec; integer
+    // rounding here aliased ~5–20 consecutive samples to the same y-value and
+    // produced a Y-axis staircase on the PLAN-side chart once CC#7 routed
+    // per-second data through. Display sites round; comparison sites (`<= 20`,
+    // `<= 40`) work identically on float.
+    wbalPct: (wbalSeries[i] / wPrime) * 100,
   }));
 }
 

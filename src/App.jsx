@@ -1036,7 +1036,12 @@ function WbalChart({ wbalData, athlete, gpxStats = null, imperial = false, durat
   const altMin = validAlts.length ? Math.floor(Math.min(...validAlts) / 10) * 10 : 0;
   const altMax = validAlts.length ? Math.ceil(Math.max(...validAlts) / 10) * 10 : 400;
 
-  const data = wbalData.map((pt, i) => ({ ...pt, time: Math.round(pt.time * viScale), altM: altVals[i] }));
+  // 4B.5: do NOT round to integer minutes here. Post-CC#7 PLAN-side wbalData
+  // is per-second (~12k entries with fractional-minute `time`); rounding
+  // collapsed 60 consecutive points onto the same x and produced a staircase.
+  // ANALYZE-side feeds 1-min `chartData` from `buildWbalFromRawSeries`, where
+  // `pt.time` is integer minutes anyway — viScale stays a no-op rescale there.
+  const data = wbalData.map((pt, i) => ({ ...pt, time: pt.time * viScale, altM: altVals[i] }));
 
   const fmtTime = (mins) => {
     const h = Math.floor(mins / 60);
@@ -1073,7 +1078,7 @@ function WbalChart({ wbalData, athlete, gpxStats = null, imperial = false, durat
           <Tooltip content={({ active, payload }) => {
             if (!active || !payload?.length) return null;
             const d = payload[0]?.payload;
-            const pct = d?.wbalPct ?? 0;
+            const pct = Math.round(d?.wbalPct ?? 0);   // 4B.5: round at display; series carries float
             const lc = pct >= 40 ? "#00FF8C" : pct >= 20 ? "#FFB800" : "#FF3347";
             return (
               <div style={{ background: T.surface, border: `1px solid ${T.border}`, padding: "8px 12px", borderRadius: 4, fontSize: 12 }}>
