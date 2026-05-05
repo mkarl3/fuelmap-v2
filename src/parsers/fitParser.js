@@ -282,29 +282,10 @@ export async function parseFIT(buffer) {
   const movingMin  = Math.round(displayMovingSec / 60);
   const stoppedMin = Math.round(displayStoppedSec / 60);
 
-  // ── Build elapsed-time 1-Hz power series for NP/avg power ────────────────
-  // NP must be computed on the elapsed-time stream (with zeros for stopped
-  // and gap seconds) so the 30-sec rolling window operates on contiguous time.
-  // This is what the legacy parser does (it computes NP on `powerSeries`
-  // before the moving-time filtering runs).
-  const powerSeries = [];
-  for (let t = 0; t <= elapsedSec; t++) {
-    const r = byTs[t];
-    powerSeries.push(r && r.power !== null ? r.power : 0);
-  }
-  const rawAvgPower = powerSeries.length
-    ? Math.round(powerSeries.reduce((s, p) => s + p, 0) / powerSeries.length)
-    : 0;
-  const rollingAvgs = [];
-  for (let i = 0; i < powerSeries.length; i++) {
-    const w = powerSeries.slice(Math.max(0, i - 29), i + 1);
-    rollingAvgs.push(w.reduce((s, p) => s + p, 0) / w.length);
-  }
-  const rawNP = rollingAvgs.length
-    ? Math.round(Math.pow(rollingAvgs.reduce((s, p) => s + Math.pow(p, 4), 0) / rollingAvgs.length, 0.25))
-    : 0;
-
   // ── Build moving-time 1-second series (stopped seconds excluded) ─────────
+  // Auto-pause gaps are filtered out via stoppedOffsets; coasting zeros
+  // within moving time are retained. This series is the canonical timeline
+  // for all aggregate ride metrics (rawAvgPower, rawNP).
   const movingPowerSeries   = [];
   const movingAltSeries     = [];
   const movingDistSeries    = []; // per-second distance delta in meters
@@ -328,6 +309,53 @@ export async function parseFIT(buffer) {
     }
     if (distM !== null) prevDistM = distM;
   }
+
+  // ── Aggregate ride metrics — both on the moving timeline ─────────────────
+  //
+  // **Convention (locked in Prompt 3.7):** both avg power and NP compute over
+  // movingPowerSeries — auto-pause gaps excluded, coasting zeros included.
+  // This is the only convention that satisfies the variance-penalty inequality
+  // NP ≥ avg power, because both metrics are arithmetic transforms of the
+  // same underlying series.
+  //
+  // Prior conventions and why they were wrong:
+  //  • Pre-3.6: avg = sum / elapsedSec (denominator over-counted auto-pause
+  //    zero-fill) — produced TDL avg = 134W vs expected ~160W.
+  //  • Post-3.6 (Convention B): avg = sum(non-zero moving) / count(non-zero
+  //    moving) — Garmin convention, but elapsed-timeline NP made the numbers
+  //    incoherent (TDL avg 178 > NP 175). Side note: produced large
+  //    convention drift on TR/Zwift re-exports.
+  //  • This prompt (Convention C): avg over moving timeline including
+  //    coasting zeros; NP rolling window operates on the same moving-only
+  //    series with no auto-pause zero-fill. Coherent and physiologically
+  //    defensible — coasting was part of the ride; the auto-pause gap was
+  //    not.
+  //
+  // Trade-off: this differs from Garmin's `session.avg_power` (which
+  // typically excludes coasting zeros, ≈ Convention B). FuelMAP prioritizes
+  // PLAN/ANALYZE internal consistency over matching device session values
+  // for the avg-power metric. NP turns out to nearly match Garmin's reported
+  // value as a side effect — they appear to also compute on the moving
+  // timeline.
+  const movingSum = movingPowerSeries.reduce((s, p) => s + p, 0);
+  const rawAvgPower = movingPowerSeries.length > 0
+    ? Math.round(movingSum / movingPowerSeries.length)
+    : 0;
+
+  // 30-sec rolling window on the moving series → 4th-power mean → 4th root.
+  // The window does NOT bridge auto-pause gaps because the moving timeline
+  // has them excluded entirely; the rider's pre-pause and post-pause power
+  // become arithmetically adjacent. This is correct: the rolling-window
+  // smoothing models neuromuscular response on continuous moving time, and
+  // the activity at the pause boundary is what we care about.
+  const rollingAvgs = movingPowerSeries.map((_, i, a) => {
+    const lo = Math.max(0, i - 29);
+    let s = 0; for (let j = lo; j <= i; j++) s += a[j];
+    return s / (i - lo + 1);
+  });
+  const rawNP = rollingAvgs.length
+    ? Math.round(Math.pow(rollingAvgs.reduce((s, p) => s + Math.pow(p, 4), 0) / rollingAvgs.length, 0.25))
+    : 0;
 
   // ── 5-min block map keyed by MOVING time minutes ─────────────────────────
   // Kept identical to legacy parser for buildPowerStreamFromFIT compatibility.
