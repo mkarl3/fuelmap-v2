@@ -33,7 +33,14 @@ const WARMUP_MIN_SPEED_MS   = 0.3;   // below this speed, we cap blockTime at 1 
 const EMPTY_ROUTE_FALLBACK_MIN = 180; // when speed solver fails entirely
 const DISPLAY_BLOCK_MIN     = 2;     // chart aggregation: 2-min display blocks
 const NP_ROLLING_WINDOW_SEC = 30;    // canonical NP rolling-window length
-const CLIMB_GRADE_THRESHOLD_PCT = 3; // grade ≥ this triggers climb-cap lookup
+
+// (Prompt 4A.5: a `CLIMB_GRADE_THRESHOLD_PCT = 3` constant was previously
+// declared here and used as the cap-application gate. It was misleadingly
+// imported from `detectClimbs`'s route-topology semantic — appropriate
+// there for "what counts as a named climb on the course," wrong here for
+// "which blocks get a cap." Removed in 4A.5. Caps now route through
+// `gradeCategory` per spec 2.6 / 4.2 Group C — every non-descent block
+// receives its category's cap, regardless of how shallow the grade is.)
 
 /**
  * Grade-dependent descent floor (spec 4.2 Group B).
@@ -184,19 +191,25 @@ export function buildPowerStream(
     // (Step 9 of Prompt 4A).
     let blockCeiling = Math.min(maxPower, athlete.ftp * 2);
 
-    // Group B (spec 4.2): grade-dependent descent floor.
-    // Replaces the legacy 60W literal floor on descents with a realistic
-    // grade-aware model. Climb blocks still use category caps below.
+    // Floor / ceiling routing per spec 4.2 Groups B + C, fixed in 4A.5.
+    // `gradeCategory` (spec 2.6) is the canonical per-block classifier:
+    //   gradePct < 0       → 'descent'   (Group B grade-dependent floor)
+    //   0 ≤ gradePct < 6   → 'moderate'  (Group C cap from climbCategories)
+    //   6 ≤ gradePct < 10  → 'steep'
+    //   gradePct ≥ 10      → 'wall'
+    // Caps apply uniformly across non-descent blocks — every block ≥ 0%
+    // grade gets the corresponding category cap, regardless of whether the
+    // grade is shallow enough that `detectClimbs` would skip it as a named
+    // climb. The 3% threshold belongs to route-topology classification, not
+    // per-block effort budgeting.
     if (gradePct < 0) {
+      // Group B descent floor — no climb cap on descents.
       blockFloor = descentFloorWatts(gradePct, flatWattsForBlock, athlete.ftp);
-    }
-
-    if (climbCategories && gradePct >= CLIMB_GRADE_THRESHOLD_PCT) {
-      // Group C: when climbCategories is provided, caps are mandatory (pre-
-      // populated at race creation, auto-restored on user-clear). A missing
-      // or zero `max` here is a bug indicator — caller should ensure caps
-      // are populated before calling. The guard below is defensive only;
-      // surfaces via _physicsUnwrap → fitWarn console path.
+    } else if (climbCategories) {
+      // Group C climb cap. When climbCategories is provided, caps are
+      // mandatory (pre-populated at race creation, auto-restored on user-
+      // clear by computePlan in App.jsx). A missing or zero `max` is a bug
+      // indicator — surface via _physicsUnwrap → fitWarn console path.
       const cat = gradeCategory(gradePct);
       const catSettings = climbCategories[cat];
       if (!catSettings || !(catSettings.max > 0)) {
@@ -205,10 +218,10 @@ export function buildPowerStream(
       blockCeiling = catSettings.max;
       if (catSettings.min > 0) blockFloor = catSettings.min;
     }
-    // When climbCategories is null (search-loop callers, until step 9 of
-    // Prompt 4A flips them to pass real values), the legacy FTP×2 fallback
-    // applies via blockCeiling above. That path goes away with Group D once
-    // search-with-caps lands and all call sites pass real climbCategories.
+    // When climbCategories is null (legacy callers — none in current flow
+    // post-Prompt 4A), the legacy `min(maxPower, ftp×2)` fallback ceiling
+    // applies via blockCeiling above. Defensive code path; effectively dead
+    // in normal flow.
     // Clamp gradeWatts to the resolved floor/ceiling. The legacy 60W literal
     // is gone — descent floor handles the descent case; climb caps the climb
     // case; flat blocks fall back to gradeWatts naturally.
