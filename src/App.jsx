@@ -5,13 +5,16 @@ import { parseFIT, inferHasPower, inferHasHR } from './parsers/fitParser';
 import {
   powerAtSpeed, speedAtPower, gradeForSlice, rhoFromTemp, bikePhysics, blendedCrr,
   gradeCategory, carbOxidationRate, recommendIntakeRate, computeZoneDist,
+  computeVI, estimateDuration, computeCP, deriveWPrime, getSegmentIF,
+  buildWbal, buildWbalFromRawSeries, buildPerClimbStats, detectClimbs,
+  fitWarn,
   COGGAN_ZONES, DEFAULTS,
 } from './physics/index.js';
-// NOTE: `climbCategory` is exported from ./physics but NOT imported here yet.
-// The legacy local `climbCategory(avgGradePct)` (below) is still consumed by
-// `detectClimbs`. Prompt 3 will rewrite detectClimbs and switch its call to
-// the new `climbCategory(climbStats)` form, deleting the legacy local at
-// the same time. Do not import climbCategory until then — name shadowing.
+// (Prompt 3 rewrote detectClimbs to use the new climbCategory(climbStats)
+// from the physics module. The legacy local climbCategory(avgGradePct) was
+// deleted at the same time. climbCategory is still not imported here because
+// nothing in App.jsx-level code calls it directly — only detectClimbs does,
+// which is now in physics.)
 
 // Defensive unwrap for physics helpers that return structured errors per CC#6.
 // Most existing Step 3/4 call sites never pass invalid input (e.g., negative
@@ -20,6 +23,12 @@ import {
 // errors comes in a later prompt.
 function _physicsUnwrap(result, fallback = 0) {
   if (result && typeof result === 'object' && result.ok === false) {
+    // Single hook for the future warnings-UI prompt: every actual unwrap
+    // goes through fitWarn so the UI consumer doesn't need to grep call
+    // sites. console.error retained for the current dev-tools workflow.
+    fitWarn(`physics_unwrap_${result.reason}`,
+      `Physics helper returned structured error: ${result.reason}`,
+      result.detail ?? null);
     console.error('[physics] failed:', result.reason, result.detail ?? '');
     return fallback;
   }
@@ -99,62 +108,16 @@ const DEFAULT_BIKE = {
   tireId: "road_28_32",
 };
 
-// Compute weighted-average Crr from surface mix array [{id, pct}], modified by tire multiplier
-// Estimate variability index correction factors from route profile and surface mix.
-// Two-component model calibrated against Barry-Roubaix 2026 FIT data:
-//   VI_grade   = residual grade effect the constant-speed model doesn't capture
-//                = 1.020 + 0.107 × (totalVertM_per_km / 100)
-//                Calibration: 28.1 m/km vert → VI_grade 1.050, matches literature
-//   VI_terrain = weighted surface roughness offset (additive)
-//                Calibrated: L2 gravel race = 1.092 total VI, terrain component = 0.042
-// Returns { viGrade, viTerrain, viTotal, correctedDurationMin, durationLoMin, durationHiMin }
-function computeVI(gpxStats, surfaceMix, physicsEstimateDurationMin) {
-  const totalVertM = (gpxStats.elevGainM ?? 0) + (gpxStats.elevLossM ?? 0);
-  const totalDistKm = gpxStats.totalDistKm ?? 1;
-  const vertPerKm = totalVertM / totalDistKm;
-
-  const viGrade = 1.020 + 0.107 * (vertPerKm / 100);
-
-  const viTerrain = (surfaceMix ?? []).reduce((sum, s) => {
-    const surf = SURFACES.find(x => x.id === s.id);
-    return sum + (surf?.viOffset ?? 0) * (s.pct / 100);
-  }, 0);
-
-  const viTotal = viGrade + viTerrain;
-  const correctedDurationMin = physicsEstimateDurationMin * viTotal;
-  // ±5% uncertainty band
-  const durationLoMin = physicsEstimateDurationMin * viTotal * 0.95;
-  const durationHiMin = physicsEstimateDurationMin * viTotal * 1.05;
-
-  return {
-    viGrade: Math.round(viGrade * 1000) / 1000,
-    viTerrain: Math.round(viTerrain * 1000) / 1000,
-    viTotal: Math.round(viTotal * 1000) / 1000,
-    correctedDurationMin: Math.round(correctedDurationMin),
-    durationLoMin: Math.round(durationLoMin),
-    durationHiMin: Math.round(durationHiMin),
-  };
-}
-
 // Derive physics params from a bike profile object
-// Estimate duration using the same model as buildPowerStream:
-// rider holds flat-road speed at target IF, so duration = totalDist / flatSpeed
-function estimateDuration(gpxStats, athlete, ifVal, Crr = 0.004, CdA = 0.32, eta = 0.975, bikeWeight = 0, rho = 1.225, windSpeedMs = 0, windDirDeg = 270) {
-  const totalMass = athlete.weight + bikeWeight;
-  const totalDistM = gpxStats.totalDistKm * 1000;
-  // Duration based on flat-road speed at target IF — wind affects power demand not pace target
-  const flatSpeed = _physicsUnwrap(speedAtPower(ifVal * athlete.ftp, 0, totalMass, Crr, CdA, eta, rho, 0));
-  return flatSpeed > 0.1 ? (totalDistM / flatSpeed) / 60 : 9999;
-}
-
-// Binary search: find IF that produces targetDurationMin.
-// Higher IF → higher flatSpeed → shorter duration.
-// If duration > target (too slow), raise lo to increase IF.
-function ifForTargetDuration(gpxStats, athlete, targetDurationMin, Crr = 0.004, CdA = 0.32, eta = 0.975, bikeWeight = 0, rho = 1.225, windSpeedMs = 0, windDirDeg = 270) {
+// TODO(cleanup): `ifForTargetDuration` below is dead code (no callers found
+// in App.jsx — searched at Prompt 3 investigation). Not in spec; consider
+// removing in a future cleanup prompt. The wind args were silently dropped
+// when estimateDuration's signature was tightened in Prompt 3.
+function ifForTargetDuration(gpxStats, athlete, targetDurationMin, Crr = 0.004, CdA = 0.32, eta = 0.975, bikeWeight = 0, rho = 1.225) {
   let lo = 0.30, hi = 1.15;
   for (let i = 0; i < 60; i++) {
     const mid = (lo + hi) / 2;
-    estimateDuration(gpxStats, athlete, mid, Crr, CdA, eta, bikeWeight, rho, windSpeedMs, windDirDeg) > targetDurationMin ? lo = mid : hi = mid;
+    _physicsUnwrap(estimateDuration(gpxStats, athlete, mid, Crr, CdA, eta, bikeWeight, rho), 9999) > targetDurationMin ? lo = mid : hi = mid;
   }
   return Math.round((lo + hi) / 2 * 100) / 100;
 }
@@ -170,77 +133,6 @@ const CLIMB_CATEGORIES = [
   { id: "wall",     label: "Wall",     minGrade: 10, maxGrade: 99, color: "rgba(255,51,71,0.22)",  borderColor: "rgba(255,51,71,0.6)"  },
 ];
 
-function climbCategory(avgGradePct) {
-  if (avgGradePct >= 10) return "wall";
-  if (avgGradePct >= 6)  return "steep";
-  return "moderate";
-}
-
-function detectClimbs(gpxStats) {
-  if (!gpxStats?.segmentGrades || gpxStats.segmentGrades.length === 0) return [];
-  const segs = gpxStats.segmentGrades;
-  const totalDistM = gpxStats.totalDistKm * 1000;
-  const GRADE_THRESHOLD = 0.03; // 3%
-  const GAP_TOLERANCE   = 2;    // blocks of sub-threshold allowed mid-climb
-
-  const climbs = [];
-  let inClimb = false;
-  let climbStart = 0;       // cumulative meters
-  let gapCount = 0;
-  let climbBlocks = [];     // { gradeDecimal, distM, startM }
-  let cumM = 0;
-
-  const flush = () => {
-    if (climbBlocks.length === 0) return;
-    // Trim trailing gap blocks
-    while (climbBlocks.length > 0 && climbBlocks[climbBlocks.length - 1].gradeDecimal < GRADE_THRESHOLD) {
-      climbBlocks.pop();
-    }
-    if (climbBlocks.length === 0) return;
-    const startM  = climbBlocks[0].startM;
-    const lengthM = climbBlocks.reduce((s, b) => s + b.distM, 0);
-    const avgGrade = climbBlocks.reduce((s, b) => s + b.gradeDecimal * b.distM, 0) / lengthM;
-    const peakGrade = Math.max(...climbBlocks.map(b => b.gradeDecimal));
-    // Elevation gain: sum positive grade × distance
-    const gainM = climbBlocks.reduce((s, b) => s + Math.max(0, b.gradeDecimal * b.distM), 0);
-    const cat = climbCategory(avgGrade * 100);
-    climbs.push({
-      id: climbs.length + 1,
-      startDistKm: Math.round(startM / 100) / 10,
-      lengthKm:    Math.round(lengthM / 100) / 10,
-      avgGrade:    Math.round(avgGrade * 1000) / 10,   // %
-      peakGrade:   Math.round(peakGrade * 1000) / 10,  // %
-      gainM:       Math.round(gainM),
-      category:    cat,
-      // Time-domain start for ReferenceArea — filled in after duration estimate
-      startDistFrac: startM / totalDistM,
-      endDistFrac:   Math.min(1, (startM + lengthM) / totalDistM),
-    });
-  };
-
-  for (let i = 0; i < segs.length; i++) {
-    const seg = segs[i];
-    const isClimbing = seg.gradeDecimal >= GRADE_THRESHOLD;
-    if (isClimbing) {
-      if (!inClimb) { inClimb = true; gapCount = 0; climbBlocks = []; }
-      gapCount = 0;
-      climbBlocks.push({ gradeDecimal: seg.gradeDecimal, distM: seg.distM, startM: cumM });
-    } else {
-      if (inClimb) {
-        gapCount++;
-        climbBlocks.push({ gradeDecimal: seg.gradeDecimal, distM: seg.distM, startM: cumM });
-        if (gapCount > GAP_TOLERANCE) {
-          flush();
-          inClimb = false; gapCount = 0; climbBlocks = [];
-        }
-      }
-    }
-    cumM += seg.distM;
-  }
-  if (inClimb) flush();
-  return climbs;
-}
-
 // ─── PER-CLIMB PACING STATS ───────────────────────────────────────────────────
 // Maps each detected GPX climb onto movingPowerSeries (1-second) and actualWbalRaw
 // to produce per-climb NP, avg power, and W'bal remaining at climb exit.
@@ -249,78 +141,8 @@ function detectClimbs(gpxStats) {
 // climb.startDistKm / (startDistKm + lengthKm) in meters, accounting for the same
 // gpxOffsetM used in buildTerrainStream so both are in the same coordinate frame.
 //
-// Returns array of { climbId, category, startDistKm, lengthKm, avgGrade, peakGrade,
+// Returns array of { climbId, category, startDistKm, lengthKm, avgGrade, peakGradePct,
 //   np, avgP, pctFTP, wbalPctAtExit } — one entry per detected climb.
-function buildPerClimbStats(climbs, movingPowerSeries, movingDistSeries, actualWbalRaw, ftp, gpxOffsetM = 0) {
-  if (!climbs?.length || !movingPowerSeries?.length || !movingDistSeries?.length) return [];
-
-  // Build cumulative distance array from movingDistSeries, offset-adjusted so it
-  // starts at gpxOffsetM (matching the terrain stream's coordinate frame).
-  const cumDist = new Float32Array(movingDistSeries.length);
-  let acc = gpxOffsetM;
-  for (let i = 0; i < movingDistSeries.length; i++) {
-    acc += movingDistSeries[i];
-    cumDist[i] = acc;
-  }
-
-  // Wbal at each second — extract from actualWbalRaw chartData (1-min resolution).
-  // We interpolate between minute marks for per-second approximation.
-  const wbalChart = actualWbalRaw?.chartData ?? [];
-  const wPrime    = actualWbalRaw ? (actualWbalRaw.wPrime ?? 20000) : 20000;
-  const wbalAtSec = (secIdx) => {
-    if (!wbalChart.length) return null;
-    const minuteIdx = secIdx / 60;
-    const lo = Math.floor(minuteIdx);
-    const hi = Math.ceil(minuteIdx);
-    if (lo >= wbalChart.length) return wbalChart[wbalChart.length - 1].wbalPct;
-    if (hi >= wbalChart.length) return wbalChart[lo].wbalPct;
-    const t = minuteIdx - lo;
-    return Math.round(wbalChart[lo].wbalPct * (1 - t) + wbalChart[hi].wbalPct * t);
-  };
-
-  const npOf = (powers) => {
-    if (!powers.length) return 0;
-    const rolling = powers.map((_, i, a) => {
-      const w = a.slice(Math.max(0, i - 29), i + 1);
-      return w.reduce((s, p) => s + p, 0) / w.length;
-    });
-    return Math.round(Math.pow(rolling.reduce((s, p) => s + p ** 4, 0) / rolling.length, 0.25));
-  };
-
-  return climbs.map(climb => {
-    const startM = climb.startDistKm * 1000;
-    const endM   = startM + climb.lengthKm * 1000;
-
-    // Collect power seconds within this climb's distance window
-    const powers = [];
-    let lastSecInClimb = -1;
-    for (let i = 0; i < cumDist.length; i++) {
-      if (cumDist[i] >= startM && cumDist[i] <= endM) {
-        const p = movingPowerSeries[i];
-        if (p > 0) powers.push(p);
-        lastSecInClimb = i;
-      }
-    }
-
-    const np    = npOf(powers);
-    const avgP  = powers.length ? Math.round(powers.reduce((s, p) => s + p, 0) / powers.length) : 0;
-    const pctFTP = ftp > 0 && np > 0 ? Math.round(np / ftp * 100) : 0;
-    const wbalPctAtExit = lastSecInClimb >= 0 ? wbalAtSec(lastSecInClimb) : null;
-
-    return {
-      climbId:      climb.id,
-      category:     climb.category,
-      startDistKm:  climb.startDistKm,
-      lengthKm:     climb.lengthKm,
-      avgGrade:     climb.avgGrade,
-      peakGrade:    climb.peakGrade,
-      np, avgP, pctFTP,
-      wbalPctAtExit,
-      secondsInClimb: powers.length,
-    };
-  }).filter(c => c.secondsInClimb >= 20); // discard climbs with < 20s of data (missed alignment)
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Binary search: find the flat-road IF that produces a desired NP IF after the full
@@ -400,7 +222,7 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
     // so warmup is already captured. Do NOT multiply blockWatts by warmupFactor again.
     const warmupFactor = i < 3 ? 0.7 + (i / 3) * 0.3 : 1.0;
     const segIF = pacingStrategy.mode === "segments"
-      ? getSegmentIF(pacingStrategy.segments, blockStartM / totalDistM)
+      ? _physicsUnwrap(getSegmentIF(pacingStrategy.segments, blockStartM / totalDistM), baseIF)
       : baseIF;
 
     // Map 1-min block index proportionally to the 200-bucket GPX bearing array.
@@ -523,123 +345,8 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
   };
 }
 
-function getSegmentIF(segments, progress) {
-  if (!segments || segments.length === 0) return 0.75;
-  const total = segments.reduce((s, seg) => s + (seg.endKm - seg.startKm), 0);
-  let cumPct = 0;
-  for (const seg of segments) {
-    cumPct += (seg.endKm - seg.startKm) / total;
-    if (progress <= cumPct) return seg.targetIF;
-  }
-  return segments[segments.length - 1].targetIF;
-}
-
 // Realistic glycogen: ~300g base + small weight component (trained athlete)
 function startingGlycogen(weightKg) { return Math.round(weightKg * 5.5); }
-
-// ─── W'BAL MODEL (Skiba 2012) ─────────────────────────────────────────────────
-// powerStream blocks are 5-min (300s) each.
-// Above CP (≈FTP): W' depletes at (power - CP) × blockSeconds joules
-// Below CP: W' reconstitutes using Skiba exponential recovery.
-// TODO(validation): Plan-side W'bal uses 1-min blocks which is a known limitation —
-// it underestimates depletion from short surges. Acceptable for planning (forward model)
-// but should not be used for actual ride analysis. Use buildWbalFromRawSeries for actuals.
-function buildWbal(powerStream, athlete) {
-  const CP = athlete.ftp;
-  const wPrime = deriveWPrime(athlete);
-  const blockSecs = 60; // 1-min blocks
-  let wbal = wPrime;
-  const result = [];
-
-  for (const pt of powerStream) {
-    const power = pt.power;
-    if (power >= CP) {
-      const cost = (power - CP) * blockSecs;
-      wbal = Math.max(0, wbal - cost);
-    } else {
-      const tau = 546 * Math.exp(-0.01 * (CP - power)) + 316;
-      wbal = wPrime - (wPrime - wbal) * Math.exp(-blockSecs / tau);
-    }
-    result.push({
-      ...pt,
-      wbal: Math.round(wbal),
-      wbalPct: Math.round((wbal / wPrime) * 100),
-    });
-  }
-  return result;
-}
-
-// 1-second W'bal from raw moving-time power series.
-// Returns downsampled series at 1-minute resolution for charting,
-// plus raw min/peak data for analysis.
-// This is the correct approach for actual ride analysis — block averages
-// mask short hard efforts entirely (a 30s 400w surge disappears in a 5-min average).
-function buildWbalFromRawSeries(movingPowerSeries, athlete, movingAltSeries) {
-  if (!movingPowerSeries || movingPowerSeries.length === 0) return { chartData: [], minWbal: null, minWbalTime: 0, peakBurnJ: 0, peakBurnTime: 0 };
-  const CP     = athlete.ftp;
-  const wPrime = deriveWPrime(athlete);
-  let wbal     = wPrime;
-  let prevWbal = wPrime;
-  let minWbal  = wPrime;
-  let minWbalTime = 0;
-  let peakBurnJ   = 0;
-  let peakBurnTime = 0;
-
-  const minuteData = [];
-  let minuteBurnJ   = 0;
-  let minuteMinWbal = wPrime;
-  let minuteAltSum  = 0;
-  let minuteAltCnt  = 0;
-
-  for (let i = 0; i < movingPowerSeries.length; i++) {
-    const power = movingPowerSeries[i];
-    if (power > CP) {
-      wbal = Math.max(0, wbal - (power - CP));
-    } else {
-      const tau = 546 * Math.exp(-0.01 * (CP - power)) + 316;
-      wbal = wPrime - (wPrime - wbal) * Math.exp(-1 / tau);
-    }
-    const burn = Math.max(0, prevWbal - wbal);
-    minuteBurnJ   += burn;
-    minuteMinWbal  = Math.min(minuteMinWbal, wbal);
-
-    // Altitude accumulation for averaging
-    const alt = movingAltSeries?.[i];
-    if (alt !== null && alt !== undefined) { minuteAltSum += alt; minuteAltCnt++; }
-
-    if (wbal < minWbal) { minWbal = wbal; minWbalTime = i; }
-    if (burn > peakBurnJ) { peakBurnJ = burn; peakBurnTime = i; }
-    prevWbal = wbal;
-
-    if ((i + 1) % 60 === 0 || i === movingPowerSeries.length - 1) {
-      const timeMin = Math.round((i + 1) / 60);
-      minuteData.push({
-        time:     timeMin,
-        wbal:     Math.round(wbal),
-        wbalPct:  Math.round(wbal / wPrime * 100),
-        burnJ:    Math.round(minuteBurnJ),
-        burnKj:   Math.round(minuteBurnJ / 100) / 10,
-        minPct:   Math.round(minuteMinWbal / wPrime * 100),
-        altM:     minuteAltCnt > 0 ? Math.round(minuteAltSum / minuteAltCnt * 10) / 10 : null,
-      });
-      minuteBurnJ   = 0;
-      minuteMinWbal = wbal;
-      minuteAltSum  = 0;
-      minuteAltCnt  = 0;
-    }
-  }
-
-  return {
-    chartData:    minuteData,
-    minWbal:      Math.round(minWbal),
-    minWbalPct:   Math.round(minWbal / wPrime * 100),
-    minWbalTime:  minWbalTime,
-    peakBurnJ:    Math.round(peakBurnJ),
-    peakBurnTime: peakBurnTime,
-    wPrime,
-    hasAltitude:  (movingAltSeries?.some(a => a !== null)) ?? false,
-  };
-}
 
 function buildNutritionOverlay(displayStream, intakeEvents, athlete, preRaceMeal) {
   if (!displayStream || displayStream.length === 0) return [];
@@ -842,55 +549,6 @@ const RIDER_PHENOTYPES = [
 
 // Derive W' (joules) from athlete data.
 // Priority: (1) CP test result, (2) phenotype × FTP, (3) FTP × 75 fallback, (4) 20000 J hardcoded
-function deriveWPrime(athlete) {
-  if (athlete.cpTests) {
-    const filled = athlete.cpTests.filter(t => t.secs > 0 && t.watts > 0);
-    if (filled.length >= 2) {
-      // Fit CP model: energy = CP * t + W'  →  least-squares on (t, energy) pairs
-      const n = filled.length;
-      const pts = filled.map(t => ({ t: t.secs, e: t.watts * t.secs }));
-      const sumT  = pts.reduce((s, p) => s + p.t, 0);
-      const sumE  = pts.reduce((s, p) => s + p.e, 0);
-      const sumTT = pts.reduce((s, p) => s + p.t * p.t, 0);
-      const sumTE = pts.reduce((s, p) => s + p.t * p.e, 0);
-      const denom = n * sumTT - sumT * sumT;
-      if (denom !== 0) {
-        const cp = (n * sumTE - sumT * sumE) / denom;
-        const wPrime = (sumE - cp * sumT) / n;
-        return Math.max(5000, Math.round(wPrime));
-      }
-    }
-  }
-  if (athlete.phenotype && athlete.ftp) {
-    const ph = RIDER_PHENOTYPES.find(p => p.id === athlete.phenotype);
-    if (ph) return Math.round(athlete.ftp * ph.wMult);
-  }
-  if (athlete.ftp) return Math.round(athlete.ftp * 75);
-  return 20000;
-}
-
-// Compute CP and goodness-of-fit from cpTests array
-function computeCP(cpTests) {
-  const filled = (cpTests || []).filter(t => t.secs > 0 && t.watts > 0);
-  if (filled.length < 2) return null;
-  const n = filled.length;
-  const pts = filled.map(t => ({ t: t.secs, e: t.watts * t.secs }));
-  const sumT  = pts.reduce((s, p) => s + p.t, 0);
-  const sumE  = pts.reduce((s, p) => s + p.e, 0);
-  const sumTT = pts.reduce((s, p) => s + p.t * p.t, 0);
-  const sumTE = pts.reduce((s, p) => s + p.t * p.e, 0);
-  const denom = n * sumTT - sumT * sumT;
-  if (denom === 0) return null;
-  const cp = (n * sumTE - sumT * sumE) / denom;
-  const wPrime = (sumE - cp * sumT) / n;
-  // R² goodness of fit
-  const meanE = sumE / n;
-  const ssTot = pts.reduce((s, p) => s + Math.pow(p.e - meanE, 2), 0);
-  const ssRes = pts.reduce((s, p) => s + Math.pow(p.e - (cp * p.t + wPrime), 2), 0);
-  const r2 = ssTot === 0 ? 1 : 1 - ssRes / ssTot;
-  return { cp: Math.round(cp), wPrime: Math.max(5000, Math.round(wPrime)), r2: Math.round(r2 * 1000) / 10 };
-}
-
 const DEFAULT_ATHLETE = {
   id: 1, name: "Athlete 1", ftp: 250, weight: 79.4,
   maxHR: 175,
@@ -1151,7 +809,12 @@ function bucketByTerrain(movingPowerSeries, movingAltSeries, movingDistSeries, m
   let gpxOffsetM = 0;
   if (gpxRoute?.segmentGrades?.length > 0 && fitFirstGPS) {
     if (gpxRoute._gpxPts) {
-      // Best path: full GPX point array available — nearest-neighbor GPS match
+      // Best path: full GPX point array available — nearest-neighbor GPS match.
+      // BOUNDED SEARCH: only consider GPX points within DEFAULTS.gpsMatchSearchWindowM
+      // of the route start. The rider's first GPS is by definition near the start;
+      // on loop courses the route's last point sits geographically near the start
+      // too, and an unbounded search picks that, collapsing the offset to ~routeLen.
+      // See Prompt 3.5 regression diagnosis.
       const haversine = (lat1, lon1, lat2, lon2) => {
         const R = 6371000, toRad = Math.PI / 180;
         const dLat = (lat2 - lat1) * toRad, dLon = (lon2 - lon1) * toRad;
@@ -1161,6 +824,7 @@ function bucketByTerrain(movingPowerSeries, movingAltSeries, movingDistSeries, m
       const pts = gpxRoute._gpxPts;
       let minD = Infinity, minIdx = 0;
       for (let i = 0; i < pts.length; i++) {
+        if (pts[i].cumDistM > DEFAULTS.gpsMatchSearchWindowM) break; // pts are in route order
         const d = haversine(pts[i].lat, pts[i].lon, fitFirstGPS.lat, fitFirstGPS.lon);
         if (d < minD) { minD = d; minIdx = i; }
       }
@@ -1346,7 +1010,7 @@ function ElevPowerChart({ displayStream, gpxStats, ftp, imperial = false, detect
                   <div style={{ color: T.textMuted, marginBottom: 4 }}>{fmtTime(label)} · {d?.distKm}km</div>
                   {activeBand && (
                     <div style={{ color: activeBand.stroke, marginBottom: 4, fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                      {activeBand.category} #{activeBand.id} · {activeBand.lengthKm}km · avg {activeBand.avgGrade}% · peak {activeBand.peakGrade}% · +{imperial ? Math.round(activeBand.gainM * 3.281) : activeBand.gainM}{eleUnit}
+                      {activeBand.category} #{activeBand.id} · {activeBand.lengthKm}km · avg {activeBand.avgGrade}% · peak {activeBand.peakGradePct}% · +{imperial ? Math.round(activeBand.gainM * 3.281) : activeBand.gainM}{eleUnit}
                     </div>
                   )}
                   <div style={{ color: zoneColor((d?.power||0)/useFTP) }}>Power: {d?.power}w ({Math.round((d?.power||0)/useFTP*100)}% FTP)</div>
@@ -1514,7 +1178,7 @@ function GlycogenChart({ overlayData, athlete, durationMin, estimatedDurationMin
 // ─── W'BAL CHART ──────────────────────────────────────────────────────────────
 function WbalChart({ wbalData, athlete, gpxStats = null, imperial = false, durationMin, estimatedDurationMin }) {
   if (!wbalData || wbalData.length === 0) return null;
-  const wPrime = deriveWPrime(athlete);
+  const wPrime = _physicsUnwrap(deriveWPrime(athlete), DEFAULTS.wPrimeFallbackJ);
   const rawDuration = estimatedDurationMin ?? (wbalData[wbalData.length - 1]?.time ?? 1);
   const totalDurationMin = durationMin ?? rawDuration;
   const viScale = rawDuration > 0 ? totalDurationMin / rawDuration : 1;
@@ -1803,7 +1467,7 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
   );
 
   // Live-derive W' from current form state
-  const derivedWPrime = deriveWPrime(form);
+  const derivedWPrime = _physicsUnwrap(deriveWPrime(form), DEFAULTS.wPrimeFallbackJ);
   const cpResult = computeCP(form.cpTests);
 
   // Determine confidence label
@@ -2218,8 +1882,8 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     const adjIF = pacingPlan.ifActual * (1 + sensPower / 100);
     const weightDeltaKg = imperial ? sensWeight / 2.205 : sensWeight;
     const adjAthlete = { ...athlete, weight: Math.max(40, athlete.weight + weightDeltaKg) };
-    const adjBase = estimateDuration(effectiveStats, athlete, pacingPlan.ifActual, _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr), CdA, eta, activeBike.weight, rhoActual);
-    const adjNew  = estimateDuration(effectiveStats, adjAthlete, adjIF, Crr, adjCdA, eta, activeBike.weight, rhoActual);
+    const adjBase = _physicsUnwrap(estimateDuration(effectiveStats, athlete, pacingPlan.ifActual, _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr), CdA, eta, activeBike.weight, rhoActual), 0);
+    const adjNew  = _physicsUnwrap(estimateDuration(effectiveStats, adjAthlete, adjIF, Crr, adjCdA, eta, activeBike.weight, rhoActual), 0);
     return sensBaseDuration + (adjNew - adjBase);
   })() : 0;
   const sensDeltaMin = sensAdjDuration - sensBaseDuration;
@@ -2237,7 +1901,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       // plans regenerate identical numbers to plan-time.
       athleteSnapshot: {
         id: athlete.id, name: athlete.name, ftp: athlete.ftp,
-        weight: athlete.weight, wPrime: deriveWPrime(athlete), phenotype: athlete.phenotype,
+        weight: athlete.weight, wPrime: _physicsUnwrap(deriveWPrime(athlete), DEFAULTS.wPrimeFallbackJ), phenotype: athlete.phenotype,
         maxCarbIntakeGPerHr: athlete.maxCarbIntakeGPerHr ?? 90,
       },
       bikeSnapshot: {
@@ -2312,7 +1976,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     // (See snapshot TODO in saveOrUpdateRace — same incomplete shape applies here.)
     const snap = {
       id: currentAthlete.id, name: currentAthlete.name, ftp: currentAthlete.ftp,
-      weight: currentAthlete.weight, wPrime: deriveWPrime(currentAthlete), phenotype: currentAthlete.phenotype,
+      weight: currentAthlete.weight, wPrime: _physicsUnwrap(deriveWPrime(currentAthlete), DEFAULTS.wPrimeFallbackJ), phenotype: currentAthlete.phenotype,
       maxCarbIntakeGPerHr: currentAthlete.maxCarbIntakeGPerHr ?? 90,
     };
     setSnapshotAthlete(snap);
@@ -2346,7 +2010,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     const bonkPt = overlayData.find(d => d.reservePct < 10);
     // W' alerts
     if (wbalData.length > 0) {
-      const wPrime = deriveWPrime(athlete);
+      const wPrime = _physicsUnwrap(deriveWPrime(athlete), DEFAULTS.wPrimeFallbackJ);
       const depletedPt = wbalData.find(d => d.wbal === 0);
       const critPt = wbalData.find(d => d.wbalPct <= 20);
       const warnPt = wbalData.find(d => d.wbalPct <= 40);
@@ -2876,7 +2540,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                                   <td style={{ padding: "5px 8px", color: T.textMuted, fontFamily: "Barlow Condensed" }}>{distLabel}</td>
                                   <td style={{ padding: "5px 8px", color: T.textMuted, fontFamily: "Barlow Condensed" }}>{lenLabel}</td>
                                   <td style={{ padding: "5px 8px", color: T.text, fontFamily: "Barlow Condensed" }}>{c.avgGrade}%</td>
-                                  <td style={{ padding: "5px 8px", color: T.text, fontFamily: "Barlow Condensed" }}>{c.peakGrade}%</td>
+                                  <td style={{ padding: "5px 8px", color: T.text, fontFamily: "Barlow Condensed" }}>{c.peakGradePct}%</td>
                                   <td style={{ padding: "5px 8px", color: T.text, fontFamily: "Barlow Condensed" }}>{gainLabel}</td>
                                   <td style={{ padding: "5px 8px" }}>
                                     <span style={{ color: catDef?.borderColor, fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 10, textTransform: "uppercase" }}>
@@ -2924,7 +2588,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             <div className="stat-box"><div className="stat-label">Avg Speed</div><div className="stat-value">{imperial ? Math.round(pacingPlan.avgSpeedKph * 0.621) : pacingPlan.avgSpeedKph}<span className="stat-unit">{imperial ? "mph" : "kph"}</span></div></div>
           </div>
           {wbalData.length > 0 && (() => {
-            const wPrime = deriveWPrime(athlete);
+            const wPrime = _physicsUnwrap(deriveWPrime(athlete), DEFAULTS.wPrimeFallbackJ);
             const minWbal = Math.min(...wbalData.map(d => d.wbal));
             const minPct = Math.round((minWbal / wPrime) * 100);
             const color = minPct > 40 ? T.green : minPct > 20 ? T.gold : T.red;
@@ -3371,7 +3035,8 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     if (!gpxStats?.segmentGrades?.length || !fitData?.movingPowerSeries?.length) return [];
     const climbs = detectClimbs(gpxStats);
     if (!climbs.length) return [];
-    // Re-use same gpxOffsetM logic as bucketByTerrain for coordinate alignment
+    // Re-use same gpxOffsetM logic as bucketByTerrain for coordinate alignment.
+    // Bounded search per Prompt 3.5 — see comment at the matching site.
     let gpxOffsetM = 0;
     if (gpxStats && fitData.firstGPS) {
       if (gpxStats._gpxPts) {
@@ -3384,6 +3049,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         const pts = gpxStats._gpxPts;
         let minD = Infinity, minIdx = 0;
         for (let i = 0; i < pts.length; i++) {
+          if (pts[i].cumDistM > DEFAULTS.gpsMatchSearchWindowM) break;
           const d = haversine(pts[i].lat, pts[i].lon, fitData.firstGPS.lat, fitData.firstGPS.lon);
           if (d < minD) { minD = d; minIdx = i; }
         }
@@ -4665,7 +4331,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                               <td style={{ padding: "6px 6px", color: T.textMuted, textAlign: "right" }}>{startDisp}</td>
                               <td style={{ padding: "6px 6px", color: T.textMuted, textAlign: "right" }}>{lenDisp}</td>
                               <td style={{ padding: "6px 6px", color: T.text, textAlign: "right", fontWeight: 700 }}>{cs.avgGrade}%</td>
-                              <td style={{ padding: "6px 6px", color: T.textMuted, textAlign: "right" }}>{cs.peakGrade}%</td>
+                              <td style={{ padding: "6px 6px", color: T.textMuted, textAlign: "right" }}>{cs.peakGradePct}%</td>
                               <td style={{ padding: "6px 8px", minWidth: 110 }}>
                                 {(() => {
                                   // Zero-centered delta sparkline.
@@ -4924,7 +4590,7 @@ function AthletesTab({ athletes, setAthletes, activeAthleteId, setActiveAthleteI
               <div style={{ fontWeight: 600, fontSize: 14 }}>{a.name}</div>
               <div style={{ fontSize: 11, color: T.textMuted }}>
                 FTP {a.ftp}w · {imperial ? Math.round(a.weight * 2.205) : a.weight}{imperial ? "lb" : "kg"} · {Math.round((a.ftp / a.weight) * 10) / 10} w/kg
-                {" · W' "}{Math.round(deriveWPrime(a) / 100) / 10}kJ
+                {" · W' "}{Math.round(_physicsUnwrap(deriveWPrime(a), DEFAULTS.wPrimeFallbackJ) / 100) / 10}kJ
                 {a.phenotype && ` · ${RIDER_PHENOTYPES.find(p => p.id === a.phenotype)?.label || ""}`}
               </div>
             </div>

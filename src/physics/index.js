@@ -26,10 +26,19 @@ export { climbCategory }                   from './helpers/climbCategory.js';
 export { carbOxidationRate }               from './helpers/carbOxidationRate.js';
 export { recommendIntakeRate }             from './helpers/recommendIntakeRate.js';
 export { computeZoneDist }                 from './helpers/computeZoneDist.js';
+export { computeVI }                       from './helpers/computeVI.js';
+export { estimateDuration }                from './helpers/estimateDuration.js';
 export { computeNP }                       from './helpers/computeNP.js';
 export { computeBlockNP }                  from './helpers/computeBlockNP.js';
 export { fitCPModel }                      from './helpers/fitCPModel.js';
+export { computeCP }                       from './helpers/computeCP.js';
+export { deriveWPrime }                    from './helpers/deriveWPrime.js';
+export { getSegmentIF }                    from './helpers/getSegmentIF.js';
 export { simulateWbal }                    from './helpers/simulateWbal.js';
+export { buildWbal }                       from './helpers/buildWbal.js';
+export { buildWbalFromRawSeries }          from './helpers/buildWbalFromRawSeries.js';
+export { buildPerClimbStats }              from './helpers/buildPerClimbStats.js';
+export { detectClimbs }                    from './helpers/detectClimbs.js';
 export { fitWarn,
          enableFitWarnBuffer,
          drainFitWarnBuffer }              from './helpers/fitWarn.js';
