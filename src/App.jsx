@@ -7,6 +7,7 @@ import {
   gradeCategory, carbOxidationRate, recommendIntakeRate, computeZoneDist,
   computeVI, estimateDuration, computeCP, deriveWPrime, getSegmentIF,
   buildWbal, buildWbalFromRawSeries, buildPerClimbStats, detectClimbs,
+  buildPowerStream, flatIFForTargetNP,
   fitWarn,
   COGGAN_ZONES, DEFAULTS,
 } from './physics/index.js';
@@ -33,6 +34,39 @@ function _physicsUnwrap(result, fallback = 0) {
     return fallback;
   }
   return result;
+}
+
+// ── Climb-cap defaults (Prompt 4A Group C / spec 4.2) ─────────────────────
+// Coefficients live in DEFAULTS.climbCapDefaults per CC#5. These helpers
+// build and patch the in-memory `{moderate, steep, wall} -> {min, max}`
+// shape PlanTab keeps in state. `min` is opt-in (default 0); only `max`
+// gets auto-populated. User edits persist; on user-clear (max → 0), the
+// auto-restore path in computePlan refills from the FTP-based default.
+function buildDefaultClimbCaps(ftp) {
+  if (!(ftp > 0)) return null; // bug indicator — caller surfaces error
+  const c = DEFAULTS.climbCapDefaults;
+  return {
+    moderate: { min: 0, max: Math.round(ftp * c.moderatePctFtp) },
+    steep:    { min: 0, max: Math.round(ftp * c.steepPctFtp)    },
+    wall:     { min: 0, max: Math.round(ftp * c.wallPctFtp)     },
+  };
+}
+
+// Returns a NEW caps object with all `max` fields populated (preserving
+// existing positive values). Returns null if FTP is missing/invalid —
+// caller treats that as a bug indicator and surfaces via _physicsUnwrap.
+function ensureClimbCapsPopulated(caps, ftp) {
+  const defaults = buildDefaultClimbCaps(ftp);
+  if (!defaults) return null;
+  const out = {};
+  for (const cat of ['moderate', 'steep', 'wall']) {
+    const cur = caps?.[cat] ?? { min: 0, max: 0 };
+    out[cat] = {
+      min: typeof cur.min === 'number' && cur.min >= 0 ? cur.min : 0,
+      max: cur.max > 0 ? cur.max : defaults[cat].max,
+    };
+  }
+  return out;
 }
 
 // ─── DESIGN TOKENS ────────────────────────────────────────────────────────────
@@ -144,206 +178,6 @@ const CLIMB_CATEGORIES = [
 // Returns array of { climbId, category, startDistKm, lengthKm, avgGrade, peakGradePct,
 //   np, avgP, pctFTP, wbalPctAtExit } — one entry per detected climb.
 // ─────────────────────────────────────────────────────────────────────────────
-
-// Binary search: find the flat-road IF that produces a desired NP IF after the full
-// grade-aware simulation. User sets target NP IF (e.g. 0.76); this finds the flat-road
-// speed that achieves it. Needed because grade variance inflates NP above the flat-road
-// IF — on a hilly course targeting flat-road IF=0.76 can produce NP IF=0.85+.
-// IMPORTANT: runs with no ceiling and no climb categories — both suppress NP and cause
-// the search to over-compensate, spiraling to implausibly high IF and short durations.
-// The ceiling/categories are applied in the single final buildPowerStream call in computePlan,
-// where they correctly slow capped blocks without distorting the IF search.
-// Runs ~30 iterations of buildPowerStream — only call on explicit user action.
-function flatIFForTargetNP(targetNpIF, gpxStats, athlete, Crr, maxPower, CdA, eta, bikeWeight, rho, windSpeedMs, windDirDeg, climbCategories) {
-  let lo = 0.30, hi = targetNpIF; // flat-road IF is always ≤ NP IF on variable terrain
-  for (let i = 0; i < 30; i++) {
-    const mid = (lo + hi) / 2;
-    const strat = { mode: "constant_if", targetIF: mid };
-    // No ceiling, no categories in search — see comment above
-    const result = buildPowerStream(gpxStats, athlete, strat, Crr, Infinity, CdA, eta, bikeWeight, rho, windSpeedMs, windDirDeg, null);
-    result.ifActual > targetNpIF ? hi = mid : lo = mid;
-  }
-  return (lo + hi) / 2;
-}
-
-function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPower = Infinity, CdA = 0.32, eta = 0.975, bikeWeight = 0, rho = 1.225, windSpeedMs = 0, windDirDeg = 270, climbCategories = null) {
-  const totalMass = athlete.weight + bikeWeight;
-  const totalDistM = gpxStats.totalDistKm * 1000;
-  const avgGrade = totalDistM > 0
-    ? (gpxStats.elevGainM - gpxStats.elevLossM) / totalDistM : 0;
-
-  const segs = gpxStats.segmentGrades && gpxStats.segmentGrades.length > 0
-    ? gpxStats.segmentGrades : [{ distM: totalDistM, gradeDecimal: avgGrade }];
-
-  // Per-block bearing array from GPX (200 buckets). Falls back to avgCourseBearing or 0.
-  const courseBearings = gpxStats.courseBearings || [];
-  const avgBearing = gpxStats.avgCourseBearing || 0;
-  // Compute headwind component for a given course bearing
-  const headwindForBearing = (bearing) => {
-    if (windSpeedMs === 0) return 0;
-    const diff = ((windDirDeg - bearing) * Math.PI) / 180;
-    return windSpeedMs * Math.cos(diff);
-  };
-
-
-  // Determine base IF and target duration
-  const baseIF = pacingStrategy.mode === "constant_if"
-    ? pacingStrategy.targetIF
-    : (pacingStrategy.segments?.[0]?.targetIF ?? 0.75);
-
-  // Flat-road speed at target IF — this is the reference speed the rider targets.
-  // Duration is computed from this, matching estimateDuration exactly.
-  const avgHeadwind = headwindForBearing(avgBearing);
-  const flatWatts = baseIF * athlete.ftp;
-  // Duration estimate: flat road, no wind (wind affects power not pace target)
-  const flatSpeed = _physicsUnwrap(speedAtPower(flatWatts, 0, totalMass, Crr, CdA, eta, rho, 0)); // m/s on flat
-  const durationMin = flatSpeed > 0.1 ? (totalDistM / flatSpeed) / 60 : 180;
-
-  // If a power ceiling is active, the ride will be slower than flatSpeed predicts.
-  const effectiveWatts = Math.min(maxPower, baseIF * athlete.ftp);
-  const effectiveFlatSpeed = _physicsUnwrap(speedAtPower(effectiveWatts, 0, totalMass, Crr, CdA, eta, rho, 0));
-  const durationEstimate = effectiveFlatSpeed > 0.1 ? (totalDistM / effectiveFlatSpeed) / 60 : 180;
-
-  // Build 1-min blocks for physics accuracy. At 1-min resolution, short punchy climbs
-  // appear as distinct distance slices and the climb floor fires on actual GPX grades
-  // rather than averaged-away 5-min grades. Each block covers a proportional distance slice.
-  const blocks = Math.max(1, Math.ceil(durationEstimate / 1));
-  const distPerBlock = totalDistM / blocks; // meters per 1-min block
-  const powerStream = [];
-  let actualDurationMin = 0;
-
-  for (let i = 0; i < blocks; i++) {
-    const blockStartM = i * distPerBlock;
-    const blockEndM = blockStartM + distPerBlock;
-    const grade = gradeForSlice(segs, blockStartM, blockEndM);
-
-    // Warmup: first 3 blocks ramp from 70% to 100% of target speed.
-    // Applied ONCE to targetSpeed only — gradeWatts derives from that reduced speed,
-    // so warmup is already captured. Do NOT multiply blockWatts by warmupFactor again.
-    const warmupFactor = i < 3 ? 0.7 + (i / 3) * 0.3 : 1.0;
-    const segIF = pacingStrategy.mode === "segments"
-      ? _physicsUnwrap(getSegmentIF(pacingStrategy.segments, blockStartM / totalDistM), baseIF)
-      : baseIF;
-
-    // Map 1-min block index proportionally to the 200-bucket GPX bearing array.
-    const bearingIdx = courseBearings.length > 0
-      ? Math.min(courseBearings.length - 1, Math.floor(i / blocks * courseBearings.length))
-      : 0;
-    const blockBearing = courseBearings.length > 0 ? (courseBearings[bearingIdx] ?? avgBearing) : avgBearing;
-    const blockHeadwind = headwindForBearing(blockBearing);
-
-    // Target speed: flat-road speed at segIF, scaled by warmup. Wind excluded from pace target.
-    const targetSpeed = _physicsUnwrap(speedAtPower(segIF * athlete.ftp, 0, totalMass, Crr, CdA, eta, rho, 0)) * warmupFactor;
-
-    // Power required to hold targetSpeed on this block's grade (no wind — rider backs off in wind).
-    const gradeWatts = powerAtSpeed(Math.max(0.5, targetSpeed), grade, totalMass, Crr, CdA, eta, rho, 0);
-
-    // Apply category-based climb power (min/max) if grade qualifies.
-    // Categories take full precedence over global ceiling on climb blocks.
-    // Global maxPower ceiling applies only to blocks where the grade demands
-    // MORE than flat-road effort — i.e. actual hard efforts, not descents.
-    // Applying the ceiling on descents (where gradeWatts > flatWatts because
-    // the rider is trying to hold pace downhill) distorts NP calculation and
-    // causes the back-solver to over-compensate, producing paradoxically faster
-    // times with a ceiling than without.
-    const gradePct = grade * 100;
-    const flatWattsForBlock = segIF * athlete.ftp;
-    const isEffortBlock = gradeWatts > flatWattsForBlock; // climb or headwind
-    let blockFloor = 0;
-    let blockCeiling = isEffortBlock ? Math.min(maxPower, athlete.ftp * 2) : athlete.ftp * 2;
-    if (climbCategories && gradePct >= 3) {
-      const cat = gradeCategory(gradePct);
-      const catSettings = climbCategories[cat];
-      if (catSettings) {
-        if (catSettings.min > 0) blockFloor   = catSettings.min;
-        if (catSettings.max > 0) blockCeiling = catSettings.max;
-      }
-    }
-    const blockWatts = Math.round(Math.min(blockCeiling, Math.max(blockFloor, Math.max(60, gradeWatts))));
-
-    // Actual speed WITH wind — headwind slows you, tailwind helps.
-    const speed = _physicsUnwrap(speedAtPower(blockWatts, grade, totalMass, Crr, CdA, eta, rho, blockHeadwind));
-    const blockTimeMin = speed > 0.3 ? (distPerBlock / speed) / 60 : 1;
-    const speedKph = Math.round(speed * 3.6 * 10) / 10;
-
-    powerStream.push({
-      time: Math.round(actualDurationMin),
-      power: blockWatts,
-      pctFTP: blockWatts / athlete.ftp,
-      grade: Math.round(grade * 1000) / 10,
-      distKm: Math.round(blockStartM / 100) / 10,
-      speedKph,
-      blockTimeMin,
-    });
-    actualDurationMin += blockTimeMin;
-  }
-
-  // NP: 30-second rolling average then 4th-power mean.
-  // At 1-min blocks, window = ceil(30/60) = 1 block. Finer terrain resolution now feeds
-  // into the 4th-power mean, producing more accurate NP on variable terrain.
-  const rollingWindow = Math.max(1, Math.ceil(30 / (actualDurationMin / blocks * 60)));
-  const blockPowers = powerStream.map(p => p.power);
-  const rollingAvgs = blockPowers.map((_, i) => {
-    const window = blockPowers.slice(Math.max(0, i - rollingWindow + 1), i + 1);
-    return window.reduce((s, p) => s + p, 0) / window.length;
-  });
-  const normalizedPower = Math.round(Math.pow(
-    rollingAvgs.reduce((s, p) => s + Math.pow(p, 4), 0) / rollingAvgs.length,
-    0.25
-  ));
-  // Duration-weighted avg power, excluding zero-power blocks. Matches Garmin's
-  // convention (zeros from coasting excluded) and the ANALYZE-side calculation,
-  // making PLAN and ACTUAL directly comparable. Simple unweighted mean previously
-  // under-counted hard climb time (long, high-power blocks) and over-counted fast
-  // descent time (short, low-power blocks).
-  const activeBlocks = powerStream.filter(p => p.power > 0);
-  const totalActiveTime = activeBlocks.reduce((s, p) => s + p.blockTimeMin, 0);
-  const avgPower = totalActiveTime > 0
-    ? Math.round(activeBlocks.reduce((s, p) => s + p.power * p.blockTimeMin, 0) / totalActiveTime)
-    : 0;
-  const ifActual = Math.round((normalizedPower / athlete.ftp) * 100) / 100;
-  const tss = Math.round((actualDurationMin / 60) * ifActual * ifActual * 100);
-
-  // Build 2-min display stream by aggregating pairs of 1-min blocks.
-  // Charts render displayStream; all physics (NP, W'bal, climb floor, nutrition) uses powerStream.
-  const DISPLAY_BLOCK_MIN = 2;
-  const displayStream = [];
-  for (let i = 0; i < powerStream.length; i += DISPLAY_BLOCK_MIN) {
-    const slice = powerStream.slice(i, i + DISPLAY_BLOCK_MIN);
-    // Duration-weighted, exclude zeros — same convention as headline avgPower above.
-    const sliceActive = slice.filter(p => p.power > 0);
-    const sliceActiveTime = sliceActive.reduce((s, p) => s + p.blockTimeMin, 0);
-    const avgDisplayPower = sliceActiveTime > 0
-      ? Math.round(sliceActive.reduce((s, p) => s + p.power * p.blockTimeMin, 0) / sliceActiveTime)
-      : 0;
-    const peakGrade = Math.max(...slice.map(p => p.grade));
-    // S1-FOLLOWUP: grade and speed averaging left as simple means by design — revisit later.
-    const avgGrade = Math.round(slice.reduce((s, p) => s + p.grade, 0) / slice.length * 10) / 10;
-    const avgSpeed = Math.round(slice.reduce((s, p) => s + p.speedKph, 0) / slice.length * 10) / 10;
-    displayStream.push({
-      time: slice[0].time,
-      power: avgDisplayPower,
-      pctFTP: avgDisplayPower / athlete.ftp,
-      grade: avgGrade,
-      peakGrade: Math.round(peakGrade * 10) / 10,
-      distKm: slice[0].distKm,
-      speedKph: avgSpeed,
-    });
-  }
-
-  return {
-    powerStream,      // 1-min blocks — NP, W'bal, nutrition physics
-    displayStream,    // 2-min aggregates — charts only
-    estimatedDurationMin: Math.round(actualDurationMin),
-    avgSpeedKph: Math.round((gpxStats.totalDistKm / (actualDurationMin / 60)) * 10) / 10,
-    avgPower,
-    normalizedPower,
-    tss,
-    ifActual,
-    // VI correction — caller must pass surfaceMix separately; stored here for display
-    _physicsOnlyDurationMin: Math.round(actualDurationMin),
-  };
-}
 
 // Realistic glycogen: ~300g base + small weight component (trained athlete)
 function startingGlycogen(weightKg) { return Math.round(weightKg * 5.5); }
@@ -1758,11 +1592,14 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   const [pacingMode, setPacingMode] = useState("constant_if");
   const [targetIF, setTargetIF] = useState(0.76);
   const [maxPower, setMaxPower] = useState("");
-  const [climbCategories, setClimbCategories] = useState({
-    moderate: { min: 0, max: 0 },
-    steep:    { min: 0, max: 0 },
-    wall:     { min: 0, max: 0 },
-  });
+  // Climb-cap state pre-populates from FTP per spec 4.2 Group C. User edits
+  // persist; on user-clear the computePlan auto-restore path refills.
+  const [climbCategories, setClimbCategories] = useState(() =>
+    buildDefaultClimbCaps(currentAthlete?.ftp) ?? {
+      moderate: { min: 0, max: 0 },
+      steep:    { min: 0, max: 0 },
+      wall:     { min: 0, max: 0 },
+    });
   // TODO(weather): populated by fetchWeather() in full app
   const [weatherContext, setWeatherContext] = useState({
     tempC: null,       // null = not set; affects rho (air density)
@@ -1828,13 +1665,38 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       const Crr = _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr);
       const effWindMs = weatherContext.windSpeedMs * (weatherContext.windEff / 100);
       const mxPwr = maxPower !== "" ? Number(maxPower) : Infinity;
+
+      // Group C auto-restore: refill any cleared / zero `max` cap from the
+      // FTP-based defaults before calling buildPowerStream. If the resolved
+      // caps differ from current state, also update state so the UI shows
+      // the restored values. If FTP is missing, populatedCaps is null —
+      // buildPowerStream's structured-error guard surfaces that case.
+      const populatedCaps = ensureClimbCapsPopulated(climbCategories, athlete?.ftp);
+      const capsForPlan = populatedCaps ?? climbCategories;
+      if (populatedCaps && JSON.stringify(populatedCaps) !== JSON.stringify(climbCategories)) {
+        setClimbCategories(populatedCaps);
+      }
+
       let strat;
       if (pacingMode === "constant_if") {
         const flatIF = flatIFForTargetNP(
           targetIF, effectiveStats, athlete, Crr, mxPwr, CdA, eta,
           activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg,
-          climbCategories
+          capsForPlan
         );
+        // Spec 4.1 #2: flatIFForTargetNP can return a structured error when
+        // the requested NP IF is unreachable under the current caps. Surface
+        // to the user with the maxAchievableIF info so they can adjust.
+        if (flatIF && typeof flatIF === 'object' && flatIF.ok === false) {
+          alert(
+            flatIF.reason === 'target_unreachable_with_caps'
+              ? `Target NP IF ${targetIF.toFixed(2)} is not achievable on this course with your current climb caps. ` +
+                `Maximum achievable: ${flatIF.maxAchievableIF.toFixed(2)}. ` +
+                `Either lower your NP IF target or raise your climb caps.`
+              : `Plan generation failed: ${flatIF.reason}`
+          );
+          return;
+        }
         strat = { mode: "constant_if", targetIF: flatIF };
       } else if (pacingMode === "segments") {
         strat = { mode: "segments", segments };
@@ -1844,8 +1706,9 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           for (let i = 0; i < 30; i++) {
             const mid = (lo + hi) / 2;
             const testStrat = { mode: "constant_if", targetIF: mid };
-            // No ceiling/categories in search loop — same reason as flatIFForTargetNP
-            const testResult = buildPowerStream(effectiveStats, athlete, testStrat, Crr, Infinity, CdA, eta, activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg, null);
+            // Search applies caps (spec 4.1 #1) — same physics in search and final.
+            const testResult = buildPowerStream(effectiveStats, athlete, testStrat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg, capsForPlan);
+            if (testResult && typeof testResult === 'object' && testResult.ok === false) break;
             const testVI = computeVI(effectiveStats, surfaceMix, testResult.estimatedDurationMin);
             testVI.correctedDurationMin > goalTimeMin ? lo = mid : hi = mid;
           }
@@ -1854,7 +1717,17 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           strat = { mode: "constant_if", targetIF: 0.76 };
         }
       }
-      const result = buildPowerStream(effectiveStats, athlete, strat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg, climbCategories);
+      const result = buildPowerStream(effectiveStats, athlete, strat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg, capsForPlan);
+      // Group C: buildPowerStream may return a structured error if the climb-
+      // cap auto-restore couldn't run (FTP missing). Surface to the user.
+      if (result && typeof result === 'object' && result.ok === false) {
+        alert(`Plan generation failed: ${result.reason}.${
+          result.reason === 'climb_cap_unset'
+            ? ' Athlete FTP is required for climb-cap defaults — please set FTP in the athlete profile.'
+            : ''
+        }`);
+        return;
+      }
       const viData = computeVI(effectiveStats, surfaceMix, result.estimatedDurationMin);
       setPacingPlan({ ...result, ...viData, resolvedNpIF: result.ifActual });
       setSaved(false);
@@ -1953,7 +1826,11 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     setPacingMode(race.plan.pacingMode ?? 'constant_if');
     setTargetIF(race.plan.targetIF ?? 0.76);
     setMaxPower(race.plan.maxPower != null ? String(race.plan.maxPower) : '');
-    setClimbCategories(race.plan.climbCategories ?? { moderate: { min: 0, max: 0 }, steep: { min: 0, max: 0 }, wall: { min: 0, max: 0 } });
+    // Group C: backward-compat for races saved before pre-population existed.
+    // ensureClimbCapsPopulated preserves user-set positive values and fills
+    // any zero/missing `max` from the FTP-based defaults.
+    const savedCaps = race.plan.climbCategories ?? { moderate: { min: 0, max: 0 }, steep: { min: 0, max: 0 }, wall: { min: 0, max: 0 } };
+    setClimbCategories(ensureClimbCapsPopulated(savedCaps, currentAthlete?.ftp) ?? savedCaps);
     setGoalTimeMin(race.plan.goalTimeMin ?? 240);
     setSegments(race.plan.segments ?? []);
     setNumSegments(race.plan.segments?.length ?? 3);
@@ -1970,6 +1847,13 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     setSnapshotBike(null);
     setPlanName('Race Plan');
     setSaved(false);
+    // Reset climb caps to FTP-based defaults so the new race doesn't inherit
+    // the previous race's edits (Group C — fresh races start fresh).
+    setClimbCategories(buildDefaultClimbCaps(currentAthlete?.ftp) ?? {
+      moderate: { min: 0, max: 0 },
+      steep:    { min: 0, max: 0 },
+      wall:     { min: 0, max: 0 },
+    });
   };
 
   const updateAthleteProfile = async () => {
@@ -2033,17 +1917,23 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     if (pacingMode !== "time_targets" || goalTimeMin <= 0 || !effectiveStats?.totalDistKm) return null;
     const Crr = _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr);
     const effWind = weatherContext.windSpeedMs * (weatherContext.windEff / 100);
+    const mxPwr = maxPower !== "" ? Number(maxPower) : Infinity;
+    // Live preview also uses the auto-restored caps so search-with-caps
+    // behavior matches what computePlan will produce when the user clicks Generate.
+    const previewCaps = ensureClimbCapsPopulated(climbCategories, athlete?.ftp) ?? climbCategories;
     let lo = 0.30, hi = 1.15;
     for (let i = 0; i < 30; i++) {
       const mid = (lo + hi) / 2;
       const strat = { mode: "constant_if", targetIF: mid };
-      // No ceiling/categories in search loop — same reason as flatIFForTargetNP
-      const r = buildPowerStream(effectiveStats, athlete, strat, Crr, Infinity, CdA, eta, activeBike.weight, rhoActual, effWind, weatherContext.windDirDeg, null);
+      // Search applies caps (spec 4.1 #1).
+      const r = buildPowerStream(effectiveStats, athlete, strat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWind, weatherContext.windDirDeg, previewCaps);
+      if (r && typeof r === 'object' && r.ok === false) return null;
       const vi = computeVI(effectiveStats, surfaceMix, r.estimatedDurationMin);
       vi.correctedDurationMin > goalTimeMin ? lo = mid : hi = mid;
     }
     const finalStrat = { mode: "constant_if", targetIF: (lo + hi) / 2 };
-    const finalResult = buildPowerStream(effectiveStats, athlete, finalStrat, Crr, Infinity, CdA, eta, activeBike.weight, rhoActual, effWind, weatherContext.windDirDeg, null);
+    const finalResult = buildPowerStream(effectiveStats, athlete, finalStrat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWind, weatherContext.windDirDeg, previewCaps);
+    if (finalResult && typeof finalResult === 'object' && finalResult.ok === false) return null;
     return Math.round(finalResult.ifActual * 100) / 100;
   })();
 

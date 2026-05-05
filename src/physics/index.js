@@ -39,6 +39,8 @@ export { buildWbal }                       from './helpers/buildWbal.js';
 export { buildWbalFromRawSeries }          from './helpers/buildWbalFromRawSeries.js';
 export { buildPerClimbStats }              from './helpers/buildPerClimbStats.js';
 export { detectClimbs }                    from './helpers/detectClimbs.js';
+export { buildPowerStream }                from './helpers/buildPowerStream.js';
+export { flatIFForTargetNP }               from './helpers/flatIFForTargetNP.js';
 export { fitWarn,
          enableFitWarnBuffer,
          drainFitWarnBuffer }              from './helpers/fitWarn.js';
