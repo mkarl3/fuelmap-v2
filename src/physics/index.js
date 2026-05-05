@@ -15,6 +15,17 @@ export {
 } from './constants/referenceData.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+export { powerAtSpeed }                    from './helpers/powerAtSpeed.js';
+export { speedAtPower }                    from './helpers/speedAtPower.js';
+export { gradeForSlice }                   from './helpers/gradeForSlice.js';
+export { rhoFromTemp }                     from './helpers/rhoFromTemp.js';
+export { bikePhysics }                     from './helpers/bikePhysics.js';
+export { blendedCrr }                      from './helpers/blendedCrr.js';
+export { gradeCategory }                   from './helpers/gradeCategory.js';
+export { climbCategory }                   from './helpers/climbCategory.js';
+export { carbOxidationRate }               from './helpers/carbOxidationRate.js';
+export { recommendIntakeRate }             from './helpers/recommendIntakeRate.js';
+export { computeZoneDist }                 from './helpers/computeZoneDist.js';
 export { computeNP }                       from './helpers/computeNP.js';
 export { computeBlockNP }                  from './helpers/computeBlockNP.js';
 export { fitCPModel }                      from './helpers/fitCPModel.js';

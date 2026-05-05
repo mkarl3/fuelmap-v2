@@ -2,6 +2,29 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ComposedChart, ReferenceLine, ReferenceArea } from "recharts";
 import { loadAllRaces, saveRace, updateRace, deleteRace } from './db.js';
 import { parseFIT, inferHasPower, inferHasHR } from './parsers/fitParser';
+import {
+  powerAtSpeed, speedAtPower, gradeForSlice, rhoFromTemp, bikePhysics, blendedCrr,
+  gradeCategory, carbOxidationRate, recommendIntakeRate, computeZoneDist,
+  COGGAN_ZONES, DEFAULTS,
+} from './physics/index.js';
+// NOTE: `climbCategory` is exported from ./physics but NOT imported here yet.
+// The legacy local `climbCategory(avgGradePct)` (below) is still consumed by
+// `detectClimbs`. Prompt 3 will rewrite detectClimbs and switch its call to
+// the new `climbCategory(climbStats)` form, deleting the legacy local at
+// the same time. Do not import climbCategory until then — name shadowing.
+
+// Defensive unwrap for physics helpers that return structured errors per CC#6.
+// Most existing Step 3/4 call sites never pass invalid input (e.g., negative
+// power to speedAtPower), so the error path here is dead code in normal flow
+// — but will catch and log if upstream code regresses. UI surfacing of these
+// errors comes in a later prompt.
+function _physicsUnwrap(result, fallback = 0) {
+  if (result && typeof result === 'object' && result.ok === false) {
+    console.error('[physics] failed:', result.reason, result.detail ?? '');
+    return fallback;
+  }
+  return result;
+}
 
 // ─── DESIGN TOKENS ────────────────────────────────────────────────────────────
 // Source of truth: FuelMAP Brand & Design System v2
@@ -31,9 +54,6 @@ const T = {
   zoneGold: "rgba(255,184,0,0.10)",
   zoneRed:  "rgba(255,51,71,0.10)",
 };
-
-// ─── PHYSICS ENGINE ───────────────────────────────────────────────────────────
-const PHYSICS = { CdA: 0.32, rho: 1.225, g: 9.81, eta: 0.975 };
 
 const SURFACES = [
   { id: "tarmac",    label: "Tarmac",         Crr: 0.0040, viOffset: 0.000 },
@@ -80,13 +100,6 @@ const DEFAULT_BIKE = {
 };
 
 // Compute weighted-average Crr from surface mix array [{id, pct}], modified by tire multiplier
-function blendedCrr(mix, tireMult = 1.0) {
-  return mix.reduce((sum, s) => {
-    const surf = SURFACES.find(x => x.id === s.id);
-    return sum + (surf?.Crr ?? 0.004) * tireMult * (s.pct / 100);
-  }, 0);
-}
-
 // Estimate variability index correction factors from route profile and surface mix.
 // Two-component model calibrated against Barry-Roubaix 2026 FIT data:
 //   VI_grade   = residual grade effect the constant-speed model doesn't capture
@@ -124,67 +137,13 @@ function computeVI(gpxStats, surfaceMix, physicsEstimateDurationMin) {
 }
 
 // Derive physics params from a bike profile object
-function bikePhysics(bike) {
-  const pos = POSITIONS.find(p => p.id === bike.positionId) ?? POSITIONS[1];
-  const dt  = DRIVETRAINS.find(d => d.id === bike.drivetrainId) ?? DRIVETRAINS[1];
-  const tire = TIRE_MULTIPLIERS.find(t => t.id === bike.tireId) ?? TIRE_MULTIPLIERS[1];
-  return { CdA: pos.CdA, eta: dt.eta, tireMult: tire.mult };
-}
-
-function powerAtSpeed(v, grade, massKg, Crr = 0.004, CdA = 0.32, eta = 0.975, rho = 1.225, windMs = 0) {
-  const Fg = massKg * PHYSICS.g * Math.sin(Math.atan(grade));
-  const Fr = massKg * PHYSICS.g * Math.cos(Math.atan(grade)) * Crr;
-  const vAir = Math.max(0, v + windMs);
-  const Fa = 0.5 * rho * CdA * vAir * vAir;
-  return Math.max(0, (Fg + Fr + Fa) * v / eta);
-}
-
-function speedAtPower(targetWatts, grade, massKg, Crr = 0.004, CdA = 0.32, eta = 0.975, rho = 1.225, windMs = 0) {
-  if (targetWatts <= 0) return 0;
-  let lo = 0.1, hi = 25, mid;
-  for (let i = 0; i < 50; i++) {
-    mid = (lo + hi) / 2;
-    powerAtSpeed(mid, grade, massKg, Crr, CdA, eta, rho, windMs) < targetWatts ? lo = mid : hi = mid;
-  }
-  return mid;
-}
-
-function carbOxidationRate(watts, ftp) {
-  const pct = watts / ftp;
-  let carbPct;
-  if (pct < 0.55) carbPct = 0.38;
-  else if (pct < 0.65) carbPct = 0.52;
-  else if (pct < 0.75) carbPct = 0.65;
-  else if (pct < 0.85) carbPct = 0.78;
-  else carbPct = 0.90;
-  return (watts * 3.6 * carbPct) / 4; // g/hr — Jeukendrup fat/carb blend model
-}
-
-// Returns weighted average grade over a distance slice [startM, endM) from segmentGrades
-function gradeForSlice(segs, startM, endM) {
-  if (!segs || segs.length === 0) return 0;
-  let cumM = 0, weightedGrade = 0, totalCovered = 0;
-  for (const seg of segs) {
-    const segStart = cumM, segEnd = cumM + seg.distM;
-    cumM += seg.distM;
-    if (segEnd <= startM) continue;
-    if (segStart >= endM) break;
-    const overlapStart = Math.max(segStart, startM);
-    const overlapEnd = Math.min(segEnd, endM);
-    const overlap = overlapEnd - overlapStart;
-    weightedGrade += seg.gradeDecimal * overlap;
-    totalCovered += overlap;
-  }
-  return totalCovered > 0 ? weightedGrade / totalCovered : 0;
-}
-
 // Estimate duration using the same model as buildPowerStream:
 // rider holds flat-road speed at target IF, so duration = totalDist / flatSpeed
 function estimateDuration(gpxStats, athlete, ifVal, Crr = 0.004, CdA = 0.32, eta = 0.975, bikeWeight = 0, rho = 1.225, windSpeedMs = 0, windDirDeg = 270) {
   const totalMass = athlete.weight + bikeWeight;
   const totalDistM = gpxStats.totalDistKm * 1000;
   // Duration based on flat-road speed at target IF — wind affects power demand not pace target
-  const flatSpeed = speedAtPower(ifVal * athlete.ftp, 0, totalMass, Crr, CdA, eta, rho, 0);
+  const flatSpeed = _physicsUnwrap(speedAtPower(ifVal * athlete.ftp, 0, totalMass, Crr, CdA, eta, rho, 0));
   return flatSpeed > 0.1 ? (totalDistM / flatSpeed) / 60 : 9999;
 }
 
@@ -415,12 +374,12 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
   const avgHeadwind = headwindForBearing(avgBearing);
   const flatWatts = baseIF * athlete.ftp;
   // Duration estimate: flat road, no wind (wind affects power not pace target)
-  const flatSpeed = speedAtPower(flatWatts, 0, totalMass, Crr, CdA, eta, rho, 0); // m/s on flat
+  const flatSpeed = _physicsUnwrap(speedAtPower(flatWatts, 0, totalMass, Crr, CdA, eta, rho, 0)); // m/s on flat
   const durationMin = flatSpeed > 0.1 ? (totalDistM / flatSpeed) / 60 : 180;
 
   // If a power ceiling is active, the ride will be slower than flatSpeed predicts.
   const effectiveWatts = Math.min(maxPower, baseIF * athlete.ftp);
-  const effectiveFlatSpeed = speedAtPower(effectiveWatts, 0, totalMass, Crr, CdA, eta, rho, 0);
+  const effectiveFlatSpeed = _physicsUnwrap(speedAtPower(effectiveWatts, 0, totalMass, Crr, CdA, eta, rho, 0));
   const durationEstimate = effectiveFlatSpeed > 0.1 ? (totalDistM / effectiveFlatSpeed) / 60 : 180;
 
   // Build 1-min blocks for physics accuracy. At 1-min resolution, short punchy climbs
@@ -452,7 +411,7 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
     const blockHeadwind = headwindForBearing(blockBearing);
 
     // Target speed: flat-road speed at segIF, scaled by warmup. Wind excluded from pace target.
-    const targetSpeed = speedAtPower(segIF * athlete.ftp, 0, totalMass, Crr, CdA, eta, rho, 0) * warmupFactor;
+    const targetSpeed = _physicsUnwrap(speedAtPower(segIF * athlete.ftp, 0, totalMass, Crr, CdA, eta, rho, 0)) * warmupFactor;
 
     // Power required to hold targetSpeed on this block's grade (no wind — rider backs off in wind).
     const gradeWatts = powerAtSpeed(Math.max(0.5, targetSpeed), grade, totalMass, Crr, CdA, eta, rho, 0);
@@ -471,7 +430,7 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
     let blockFloor = 0;
     let blockCeiling = isEffortBlock ? Math.min(maxPower, athlete.ftp * 2) : athlete.ftp * 2;
     if (climbCategories && gradePct >= 3) {
-      const cat = climbCategory(gradePct);
+      const cat = gradeCategory(gradePct);
       const catSettings = climbCategories[cat];
       if (catSettings) {
         if (catSettings.min > 0) blockFloor   = catSettings.min;
@@ -481,7 +440,7 @@ function buildPowerStream(gpxStats, athlete, pacingStrategy, Crr = 0.004, maxPow
     const blockWatts = Math.round(Math.min(blockCeiling, Math.max(blockFloor, Math.max(60, gradeWatts))));
 
     // Actual speed WITH wind — headwind slows you, tailwind helps.
-    const speed = speedAtPower(blockWatts, grade, totalMass, Crr, CdA, eta, rho, blockHeadwind);
+    const speed = _physicsUnwrap(speedAtPower(blockWatts, grade, totalMass, Crr, CdA, eta, rho, blockHeadwind));
     const blockTimeMin = speed > 0.3 ? (distPerBlock / speed) / 60 : 1;
     const speedKph = Math.round(speed * 3.6 * 10) / 10;
 
@@ -862,13 +821,6 @@ function buildPowerStreamFromFIT(fitData, athlete) {
 // TODO(weather): replace manual entry with API fetch once deployed
 // fetchWeather(lat, lon, raceDate) → setWeatherContext(result)
 // Air density correction: rho varies ~4% between 0°C and 35°C
-function rhoFromTemp(tempC) {
-  // Ideal gas law approximation at sea level
-  // rho = 1.225 * (288.15 / (273.15 + tempC))
-  if (tempC === null || tempC === undefined) return 1.225;
-  return 1.225 * (288.15 / (273.15 + tempC));
-}
-
 function degToCompass(deg) {
   const dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
   return dirs[Math.round(((deg % 360) + 360) % 360 / 22.5) % 16];
@@ -946,6 +898,7 @@ const DEFAULT_ATHLETE = {
   phenotype: "allrounder",
   cpTests: [{ secs: 0, watts: 0 }, { secs: 0, watts: 0 }, { secs: 0, watts: 0 }],
   cpTestedAt: null,
+  maxCarbIntakeGPerHr: 90,
 };
 const DEFAULT_PRODUCTS = [
   { id: 1, name: "Gel (Maurten 100)", carbs: 25, sodium: 55 },
@@ -1009,37 +962,6 @@ function zoneColor(pctFTP, opacity = 1) {
   return               `rgba(168,85,247,${opacity})`;         // Z6 Anaerobic  — W-Prime
 }
 
-// ─── ZONE TIME DISTRIBUTION (6-zone Coggan) ──────────────────────────────────
-// Z1 <55% | Z2 55–75% | Z3 76–90% | Z4 91–105% | Z5 106–120% | Z6 >121%
-const POWER_ZONES = [
-  { id: "z1", label: "Z1", max: 0.55,                color: "#00D4FF" }, // Recovery   — Signal Cyan
-  { id: "z2", label: "Z2", min: 0.55, max: 0.75,    color: "#00FF8C" }, // Endurance  — Fuel Green
-  { id: "z3", label: "Z3", min: 0.76, max: 0.90,    color: "#FFB800" }, // Tempo      — Power Amber
-  { id: "z4", label: "Z4", min: 0.91, max: 1.05,    color: "#FF8C00" }, // Threshold  — Amber-Orange
-  { id: "z5", label: "Z5", min: 1.06, max: 1.20,    color: "#FF3347" }, // VO2 Max    — Redline
-  { id: "z6", label: "Z6", min: 1.21,               color: "#A855F7" }, // Anaerobic  — W-Prime
-];
-
-function computeZoneDist(powerStream, ftp) {
-  if (!powerStream || powerStream.length === 0) return POWER_ZONES.map(z => ({ ...z, pct: 0, blocks: 0 }));
-  const counts = [0, 0, 0, 0, 0, 0];
-  for (const pt of powerStream) {
-    const pct = pt.power / ftp;
-    if      (pct < 0.55) counts[0]++;
-    else if (pct < 0.76) counts[1]++;
-    else if (pct < 0.91) counts[2]++;
-    else if (pct < 1.06) counts[3]++;
-    else if (pct < 1.21) counts[4]++;
-    else                 counts[5]++;
-  }
-  const total = powerStream.length;
-  return POWER_ZONES.map((z, i) => ({
-    ...z,
-    blocks: counts[i],
-    pct: Math.round((counts[i] / total) * 100),
-  }));
-}
-
 // Zone comparison — layout:
 //   Zone names (evenly spaced, full readable width)
 //   Plan % values
@@ -1067,14 +989,12 @@ function ZoneComparisonBar({ actualStream, plannedStream, ftp }) {
     return   { label: "Mixed",                 color: T.blue,  detail: "Zone shifts offset each other" };
   })() : null;
 
-  const ZONE_NAMES = ["Recovery", "Endurance", "Tempo", "Threshold", "VO2 Max", "Anaerobic"];
-
   // Full-width bar — segments sized by zone %
   const FullBar = ({ zones, opacity }) => (
     <div style={{ display: "flex", width: "100%", height: 10, borderRadius: 4, overflow: "hidden", gap: 1 }}>
       {zones.map(z => (
         <div key={z.id} style={{ flex: Math.max(z.pct, 1), background: z.color, opacity }}
-          title={`${z.label}: ${z.pct}%`} />
+          title={`${z.name}: ${z.pct}%`} />
       ))}
     </div>
   );
@@ -1104,10 +1024,10 @@ function ZoneComparisonBar({ actualStream, plannedStream, ftp }) {
     <div>
       {/* Zone names — evenly distributed, readable, color-coded. Not tied to bar widths. */}
       <div style={{ display: "flex", justifyContent: "space-between", width: "100%", marginBottom: 8 }}>
-        {POWER_ZONES.map((z, i) => (
+        {COGGAN_ZONES.map(z => (
           <div key={z.id} style={{ fontSize: 10, fontFamily: "Barlow Condensed", fontWeight: 700,
             color: z.color, textTransform: "uppercase", letterSpacing: "0.05em", whiteSpace: "nowrap" }}>
-            {ZONE_NAMES[i]}
+            {z.name}
           </div>
         ))}
       </div>
@@ -1802,7 +1722,7 @@ function WattInput({ value, onChange, placeholder = "none" }) {
 function BikeModal({ bike, onSave, onClose, imperial }) {
   const [form, setForm] = useState({ ...bike });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const { CdA, eta, tireMult } = bikePhysics(form);
+  const { CdA, eta, tireMult } = _physicsUnwrap(bikePhysics(form), DEFAULTS.bikePhysics);
   // Local display string for weight — avoids mid-keystroke unit conversion mangling the field
   const [weightStr, setWeightStr] = useState(
     imperial ? String(Math.round((bike.weight ?? 0) * 2.205 * 10) / 10) : String(bike.weight ?? 0)
@@ -1869,6 +1789,7 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
     phenotype: "allrounder",
     cpTests: blankTests,
     cpTestedAt: null,
+    maxCarbIntakeGPerHr: 90,  // backward-compat for athletes saved before this field existed
     ...athlete,
   });
   const [cpOpen, setCpOpen] = useState(false);
@@ -2138,6 +2059,18 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
           )}
         </div>
 
+        {/* ── NUTRITION SECTION ── */}
+        {sectionDivider("Nutrition")}
+        <div style={{ marginBottom: 12 }}>
+          <label style={labelStyle}>Max Carb Intake (g/hr)</label>
+          <input style={inputStyle} type="number" min="60" max="150" step="1"
+            value={form.maxCarbIntakeGPerHr ?? ""}
+            onChange={e => set("maxCarbIntakeGPerHr", e.target.value === "" ? 90 : Number(e.target.value))} />
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, lineHeight: 1.4 }}>
+            Default 90 g/hr. Trained athletes may sustain 100–120+. Limited by gut absorption, not by power output.
+          </div>
+        </div>
+
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <button className="btn-secondary" onClick={onClose}>Cancel</button>
           <button className="btn-primary" onClick={handleSave}>Save</button>
@@ -2198,7 +2131,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     elevProfile: [],
   };
   const activeBike = snapshotBike ?? currentActiveBike;
-  const { CdA, eta, tireMult } = bikePhysics(activeBike);
+  const { CdA, eta, tireMult } = _physicsUnwrap(bikePhysics(activeBike), DEFAULTS.bikePhysics);
 
   const handleGPX = (text, name) => {
     const stats = parseGPX(text);
@@ -2228,7 +2161,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
 
   const computePlan = () => {
     try {
-      const Crr = blendedCrr(surfaceMix, tireMult);
+      const Crr = _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr);
       const effWindMs = weatherContext.windSpeedMs * (weatherContext.windEff / 100);
       const mxPwr = maxPower !== "" ? Number(maxPower) : Infinity;
       let strat;
@@ -2280,12 +2213,12 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
 
   const sensBaseDuration = pacingPlan?.estimatedDurationMin ?? 0;
   const sensAdjDuration = pacingPlan ? (() => {
-    const Crr = blendedCrr(surfaceMix, tireMult) * (1 + sensCrr / 100);
+    const Crr = _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr) * (1 + sensCrr / 100);
     const adjCdA = CdA * (1 + sensCdA / 100);
     const adjIF = pacingPlan.ifActual * (1 + sensPower / 100);
     const weightDeltaKg = imperial ? sensWeight / 2.205 : sensWeight;
     const adjAthlete = { ...athlete, weight: Math.max(40, athlete.weight + weightDeltaKg) };
-    const adjBase = estimateDuration(effectiveStats, athlete, pacingPlan.ifActual, blendedCrr(surfaceMix, tireMult), CdA, eta, activeBike.weight, rhoActual);
+    const adjBase = estimateDuration(effectiveStats, athlete, pacingPlan.ifActual, _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr), CdA, eta, activeBike.weight, rhoActual);
     const adjNew  = estimateDuration(effectiveStats, adjAthlete, adjIF, Crr, adjCdA, eta, activeBike.weight, rhoActual);
     return sensBaseDuration + (adjNew - adjBase);
   })() : 0;
@@ -2297,9 +2230,15 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       name: planName,
       updatedAt: new Date().toISOString(),
       status: 'planned',
+      // TODO: this snapshot is incomplete vs the full athlete model.
+      // Missing: maxHR, cpTests, cpTestedAt. They were dropped from the
+      // snapshot before this prompt; not adding them here keeps Prompt 2
+      // scope tight, but a future prompt should reconcile so loaded race
+      // plans regenerate identical numbers to plan-time.
       athleteSnapshot: {
         id: athlete.id, name: athlete.name, ftp: athlete.ftp,
         weight: athlete.weight, wPrime: deriveWPrime(athlete), phenotype: athlete.phenotype,
+        maxCarbIntakeGPerHr: athlete.maxCarbIntakeGPerHr ?? 90,
       },
       bikeSnapshot: {
         id: activeBike.id, name: activeBike.name, weight: activeBike.weight,
@@ -2370,9 +2309,11 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   };
 
   const updateAthleteProfile = async () => {
+    // (See snapshot TODO in saveOrUpdateRace — same incomplete shape applies here.)
     const snap = {
       id: currentAthlete.id, name: currentAthlete.name, ftp: currentAthlete.ftp,
       weight: currentAthlete.weight, wPrime: deriveWPrime(currentAthlete), phenotype: currentAthlete.phenotype,
+      maxCarbIntakeGPerHr: currentAthlete.maxCarbIntakeGPerHr ?? 90,
     };
     setSnapshotAthlete(snap);
     if (activeRaceId) {
@@ -2426,7 +2367,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   // ~1ms in JS, safe to run on every render.
   const requiredIF = (() => {
     if (pacingMode !== "time_targets" || goalTimeMin <= 0 || !effectiveStats?.totalDistKm) return null;
-    const Crr = blendedCrr(surfaceMix, tireMult);
+    const Crr = _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr);
     const effWind = weatherContext.windSpeedMs * (weatherContext.windEff / 100);
     let lo = 0.30, hi = 1.15;
     for (let i = 0; i < 30; i++) {
@@ -2518,7 +2459,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           <label style={{ fontSize: 11, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", whiteSpace: "nowrap", width: 36 }}>Bike</label>
           <select value={activeBikeId} onChange={e => setActiveBikeId(Number(e.target.value))} style={{ flex: 1, fontSize: 12 }}>
             {(bikes || []).map(b => {
-              const { CdA: bCdA, eta: bEta } = bikePhysics(b);
+              const { CdA: bCdA, eta: bEta } = _physicsUnwrap(bikePhysics(b), DEFAULTS.bikePhysics);
               return <option key={b.id} value={b.id}>{b.name} — CdA {bCdA} · η {bEta} · {imperial ? Math.round(b.weight * 2.205 * 10)/10 : b.weight}{imperial ? 'lb' : 'kg'}</option>;
             })}
           </select>
@@ -2528,7 +2469,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             <label style={{ fontSize: 11, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase" }}>Surface Mix</label>
             {(() => {
               const total = surfaceMix.reduce((s, x) => s + x.pct, 0);
-              const crr = blendedCrr(surfaceMix);
+              const crr = _physicsUnwrap(blendedCrr(surfaceMix), DEFAULTS.Crr);
               return (
                 <span style={{ fontSize: 11, fontFamily: "Barlow Condensed" }}>
                   <span style={{ color: total === 100 ? T.textMuted : T.red }}>Total: {total}%</span>
@@ -3073,7 +3014,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                   { label: "Aerodynamics (CdA)", value: sensCdA, set: setSensCdA, unit: "%", color: T.gold,
                     hint: `${sensCdA >= 0 ? "+" : ""}${sensCdA}% → CdA ${(CdA * (1 + sensCdA/100)).toFixed(3)}` },
                   { label: "Rolling Resistance (Crr)", value: sensCrr, set: setSensCrr, unit: "%", color: T.gold,
-                    hint: `${sensCrr >= 0 ? "+" : ""}${sensCrr}% → Crr ${(blendedCrr(surfaceMix, tireMult) * (1 + sensCrr/100)).toFixed(4)}` },
+                    hint: `${sensCrr >= 0 ? "+" : ""}${sensCrr}% → Crr ${(_physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr) * (1 + sensCrr/100)).toFixed(4)}` },
                 ].map(({ label, value, set, unit, color, hint }) => (
                   <div key={label} style={{ marginBottom: 14 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, alignItems: "baseline" }}>
@@ -4971,7 +4912,7 @@ function AthletesTab({ athletes, setAthletes, activeAthleteId, setActiveAthleteI
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div className="card-header" style={{ margin: 0 }}>Athlete Roster</div>
-          <button className="btn-primary" onClick={() => { setEditing({ id: null, name: "", ftp: 289, weight: 86.2, wPrime: 20000, phenotype: "allrounder", cpTests: [{ secs: 0, watts: 0 }, { secs: 0, watts: 0 }, { secs: 0, watts: 0 }], cpTestedAt: null }); setShowModal(true); }}>+ Add</button>
+          <button className="btn-primary" onClick={() => { setEditing({ id: null, name: "", ftp: 289, weight: 86.2, wPrime: 20000, phenotype: "allrounder", cpTests: [{ secs: 0, watts: 0 }, { secs: 0, watts: 0 }, { secs: 0, watts: 0 }], cpTestedAt: null, maxCarbIntakeGPerHr: 90 }); setShowModal(true); }}>+ Add</button>
         </div>
         {athletes.map(a => (
           <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", background: T.surface2, border: `1px solid ${a.id === activeAthleteId ? T.blue : T.border}`, borderRadius: 6, marginBottom: 8, cursor: "pointer" }}
@@ -5020,7 +4961,7 @@ function BikesTab({ bikes, setBikes, activeBikeId, setActiveBikeId, imperial }) 
           <button className="btn-primary" onClick={() => { setEditing({ id: null, name: "", weight: 8, positionId: "road_casual", drivetrainId: "road_std", tireId: "road_28_32" }); setShowModal(true); }}>+ Add</button>
         </div>
         {bikes.map(b => {
-          const { CdA, eta, tireMult } = bikePhysics(b);
+          const { CdA, eta, tireMult } = _physicsUnwrap(bikePhysics(b), DEFAULTS.bikePhysics);
           const pos = POSITIONS.find(p => p.id === b.positionId);
           const dt = DRIVETRAINS.find(d => d.id === b.drivetrainId);
           const tire = TIRE_MULTIPLIERS.find(t => t.id === b.tireId);
