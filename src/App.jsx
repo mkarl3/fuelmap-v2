@@ -183,38 +183,43 @@ const CLIMB_CATEGORIES = [
 // Realistic glycogen: ~300g base + small weight component (trained athlete)
 function startingGlycogen(weightKg) { return Math.round(weightKg * 5.5); }
 
-function buildNutritionOverlay(displayStream, intakeEvents, athlete, preRaceMeal) {
-  if (!displayStream || displayStream.length === 0) return [];
+// 4C sub-step 1: fully parameterized on `blockMinutes` so the function works
+// at any block resolution. All internal time-dependent constants now scale
+// with the block size. Callers pass `blockMinutes=1` post-rebuild (1-min
+// powerStream on plan side; 1-min aggregated FIT stream on actual side).
+function buildNutritionOverlay(stream, intakeEvents, athlete, preRaceMeal, blockMinutes = 1) {
+  if (!stream || stream.length === 0) return [];
   const glycogenScale = 0.7 + (preRaceMeal / 300) * 0.45;
   let glycogenReserve = Math.round(startingGlycogen(athlete.weight) * glycogenScale);
   const maxGlycogen = startingGlycogen(athlete.weight) * 1.15;
   const MAX_ABSORPTION = 90; // g/hr max intestinal absorption
+  const ABSORB_WINDOW_MIN = 20; // realistic absorption window for gels/chews/bars
 
-  // Spread each intake event over 10 blocks (~20 min at 2-min blocks) — realistic absorption
-  // window for gels, chews, bars. Ceiling of 90g/hr still applies per block.
-  const ABSORB_BLOCKS = 10;
-  const absQueue = new Array(displayStream.length).fill(0);
+  // Spread each intake event over enough blocks to cover ABSORB_WINDOW_MIN of
+  // ride time. Independent of block resolution.
+  const ABSORB_BLOCKS = Math.max(1, Math.round(ABSORB_WINDOW_MIN / blockMinutes));
+  const absQueue = new Array(stream.length).fill(0);
   for (const e of intakeEvents) {
-    const startBlock = displayStream.findIndex(pt => pt.time >= e.time);
+    const startBlock = stream.findIndex(pt => pt.time >= e.time);
     if (startBlock === -1) continue;
     const gPerBlock = (e.carbs || 0) / ABSORB_BLOCKS;
-    for (let b = startBlock; b < Math.min(startBlock + ABSORB_BLOCKS, displayStream.length); b++) {
+    for (let b = startBlock; b < Math.min(startBlock + ABSORB_BLOCKS, stream.length); b++) {
       absQueue[b] += gPerBlock;
     }
   }
 
-  return displayStream.map((pt, idx) => {
+  return stream.map((pt, idx) => {
     const burnRate = carbOxidationRate(pt.power, athlete.ftp); // g/hr
-    const burned = burnRate * (2 / 60); // g burned this 2-min block
+    const burned = burnRate * (blockMinutes / 60); // g burned this block
 
     const scheduledIntake = absQueue[idx];
-    const maxAbsorbThisBlock = MAX_ABSORPTION * (2 / 60); // 3g per 2-min block
+    const maxAbsorbThisBlock = MAX_ABSORPTION * (blockMinutes / 60);
     const actualAbsorbed = Math.min(scheduledIntake, maxAbsorbThisBlock);
     const overLimit = Math.max(0, scheduledIntake - maxAbsorbThisBlock);
 
-    // Point-in-time intake for reference markers (2-min window)
+    // Point-in-time intake for reference markers (one block's window).
     const pointIntake = intakeEvents
-      .filter(e => e.time >= pt.time && e.time < pt.time + 2)
+      .filter(e => e.time >= pt.time && e.time < pt.time + blockMinutes)
       .reduce((s, e) => s + (e.carbs || 0), 0);
 
     glycogenReserve = Math.min(maxGlycogen, Math.max(0, glycogenReserve - burned + actualAbsorbed));
@@ -225,7 +230,7 @@ function buildNutritionOverlay(displayStream, intakeEvents, athlete, preRaceMeal
       glycogenReserve: Math.round(glycogenReserve),
       reservePct: Math.round((glycogenReserve / maxGlycogen) * 100),
       gutPool: 0,
-      intakeRate: Math.round(actualAbsorbed * 12), // g/block → g/hr
+      intakeRate: Math.round(actualAbsorbed * (60 / blockMinutes)), // g/block → g/hr
       intake: Math.round(pointIntake),
       actualAbsorbed: Math.round(actualAbsorbed),
       overLimit: Math.round(overLimit),
@@ -261,7 +266,12 @@ function parseGPX(xmlText) {
       const prev = pts[pts.length - 1];
       totalDist += haversine(prev.lat, prev.lon, lat, lon);
     }
-    pts.push({ lat, lon, ele, cumDistM: totalDist });
+    // 4C sub-step 2 fix: keep `cumDistM` (parseGPX internal binary-search uses
+    // it) AND set `distM` to satisfy `alignFitToGpx`'s documented input shape.
+    // Pre-fix, the field-name mismatch silently made every aligned point's
+    // `gpxDistM` null — breaking bucketByTerrain on-route grade lookup,
+    // per-climb stats membership, and Scheme D plan-line rendering.
+    pts.push({ lat, lon, ele, cumDistM: totalDist, distM: totalDist });
   }
 
   // Pass 2: total gain/loss with 5-point centered moving-average smoothing.
@@ -348,17 +358,16 @@ function parseGPX(xmlText) {
     elevProfile,
     courseBearings,
     avgCourseBearing,
-    _gpxPts: pts, // {lat, lon, ele, cumDistM} — used for FIT-to-GPX position alignment
+    _gpxPts: pts, // {lat, lon, ele, cumDistM, distM} — used for FIT-to-GPX position alignment
   };
 }
 
-function buildPowerStreamFromFIT(fitData, athlete) {
-  return Object.entries(fitData.blockMap).map(([time, data]) => {
-    const power = Math.round(data.powers.reduce((a, b) => a + b, 0) / data.powers.length);
-    const hr = Math.round(data.hrs.filter(h => h > 0).reduce((a, b) => a + b, 0) / (data.hrs.filter(h => h > 0).length || 1));
-    return { time: Number(time), power, pctFTP: power / athlete.ftp, grade: 0, distKm: 0, speedKph: 0, hr };
-  }).sort((a, b) => a.time - b.time);
-}
+// (4C sub-step 1: `buildPowerStreamFromFIT` was retired here. It produced
+//  5-min FIT blocks from `fitData.blockMap` to match the legacy parser. Both
+//  the helper and `blockMap` itself are gone — consumers now build a 1-min
+//  stream directly from `movingPowerSeries`/`movingHRSeries`/`movingDistSeries`
+//  via the `fitMinStream` useMemo in AnalyzeTab. Keeps the rebuild's
+//  "visuals at 1-min, math at 1-sec" principle consistent.)
 
 // TODO(weather): replace manual entry with API fetch once deployed
 // fetchWeather(lat, lon, raceDate) → setWeatherContext(result)
@@ -764,8 +773,12 @@ const ZoneBar = (props) => {
 };
 
 // ─── ELEVATION + POWER DUAL CHART ────────────────────────────────────────────
-function ElevPowerChart({ displayStream, gpxStats, ftp, imperial = false, detectedClimbs = [], durationMin, estimatedDurationMin }) {
-  if (!displayStream || displayStream.length === 0) return null;
+// 4C sub-step 1: prop renamed `displayStream` → `powerStream`. The 2-min
+// `displayStream` aggregation was retired; this chart now consumes the 1-min
+// `powerStream` directly. `peakGrade` was promoted onto `powerStream` so the
+// elevation overlay still has terrain-peak emphasis.
+function ElevPowerChart({ powerStream, gpxStats, ftp, imperial = false, detectedClimbs = [], durationMin, estimatedDurationMin }) {
+  if (!powerStream || powerStream.length === 0) return null;
 
   const elevProfile = gpxStats?.elevProfile || [];
   const totalDistKm = gpxStats?.totalDistKm || 1;
@@ -777,16 +790,16 @@ function ElevPowerChart({ displayStream, gpxStats, ftp, imperial = false, detect
     return elevProfile[idx].ele;
   };
 
-  const blockDistKm = totalDistKm / displayStream.length;
+  const blockDistKm = totalDistKm / powerStream.length;
 
   // Scale block timestamps from raw physics duration → VI-corrected duration so data
   // fills the full x-axis. VI correction stretches real-world time but doesn't change
   // the terrain order — each block covers the same distance, just takes longer.
-  const rawDuration = estimatedDurationMin ?? (displayStream[displayStream.length - 1]?.time ?? 1);
+  const rawDuration = estimatedDurationMin ?? (powerStream[powerStream.length - 1]?.time ?? 1);
   const totalDurationMin = durationMin ?? rawDuration;
   const viScale = rawDuration > 0 ? totalDurationMin / rawDuration : 1;
 
-  const data = displayStream.map((pt) => {
+  const data = powerStream.map((pt) => {
     const midDistKm = pt.distKm + blockDistKm / 2;
     const eleM = eleAtDistKm(midDistKm);
     const ele = imperial ? Math.round(eleM * 3.281) : Math.round(eleM);
@@ -1746,7 +1759,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   };
 
   const overlayData = pacingPlan
-    ? buildNutritionOverlay(pacingPlan.displayStream, intakeEvents, athlete, preRaceMeal) : [];
+    ? buildNutritionOverlay(pacingPlan.powerStream, intakeEvents, athlete, preRaceMeal, 1) : [];
   // CC#7 (Prompt 4B Step 2): prefer per-second stream at dt=1 for PLAN-side
   // W'bal — matches ANALYZE side's 1-sec math and device numbers. Legacy
   // plans (saved before 4B) lack `powerStreamPerSec`; fall back to 1-min
@@ -2522,7 +2535,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 6, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>
             Elevation + Power
           </div>
-          <ElevPowerChart displayStream={pacingPlan.displayStream} gpxStats={gpxStats} ftp={athlete.ftp} imperial={imperial} detectedClimbs={gpxStats ? detectClimbs(gpxStats) : []} durationMin={pacingPlan.correctedDurationMin} estimatedDurationMin={pacingPlan.estimatedDurationMin} />
+          <ElevPowerChart powerStream={pacingPlan.powerStream} gpxStats={gpxStats} ftp={athlete.ftp} imperial={imperial} detectedClimbs={gpxStats ? detectClimbs(gpxStats) : []} durationMin={pacingPlan.correctedDurationMin} estimatedDurationMin={pacingPlan.estimatedDurationMin} />
 
           <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 6, marginTop: 14, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>
             W' Balance
@@ -2711,7 +2724,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                   <tbody>
                     {(() => {
                       let elapsedDist = 0;
-                      const tableStream = pacingPlan.displayStream ?? pacingPlan.powerStream;
+                      const tableStream = pacingPlan.powerStream;
                       return tableStream.map((pt, i) => {
                         const nextTime = i < tableStream.length - 1
                           ? tableStream[i + 1].time : pacingPlan.estimatedDurationMin;
@@ -2865,7 +2878,6 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       movingDistSeries:  fitData.movingDistSeries,
       movingAltSeries:   fitData.movingAltSeries,
       movingHRSeries:    fitData.movingHRSeries,
-      blockMap:          fitData.blockMap,
       firstGPS:          fitData.firstGPS,
       // New additive fields (forward-compat). Old saves loaded later won't
       // have these — downstream code falls back via inferHasPower/inferHasHR.
@@ -2903,9 +2915,39 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     }
   };
 
-  const fitPowerStream = fitData ? buildPowerStreamFromFIT(fitData, athlete) : [];
-  const fitOverlay = fitPowerStream.length
-    ? buildNutritionOverlay(fitPowerStream, actualIntake, athlete, 120) : [];
+  // 4C sub-step 1: 1-min FIT aggregation. Built from per-second moving series
+  // — power avg, HR avg (zeros excluded), per-block distance accumulation
+  // (cumulative `fitDistM` enables the FIT-distance x-axis arriving in
+  // sub-step 2). Replaces the retired 5-min `fitPowerStream`.
+  const fitMinStream = useMemo(() => {
+    const power = fitData?.movingPowerSeries;
+    if (!power || power.length === 0) return [];
+    const hr = fitData?.movingHRSeries ?? [];
+    const dist = fitData?.movingDistSeries ?? [];
+    const out = [];
+    let cumDistM = 0;
+    for (let i = 0; i < power.length; i += 60) {
+      const slicePower = power.slice(i, i + 60);
+      const sliceHR = hr.slice(i, i + 60).filter(h => h > 0);
+      const sliceDist = dist.slice(i, i + 60);
+      const blockDistM = sliceDist.reduce((s, d) => s + (d || 0), 0);
+      const blockStartM = cumDistM;
+      cumDistM += blockDistM;
+      const avgP = Math.round(slicePower.reduce((s, p) => s + p, 0) / slicePower.length);
+      out.push({
+        time: Math.round(i / 60),                     // minute index
+        power: avgP,
+        pctFTP: athlete.ftp > 0 ? avgP / athlete.ftp : 0,
+        hr: sliceHR.length ? Math.round(sliceHR.reduce((s, h) => s + h, 0) / sliceHR.length) : 0,
+        fitDistM: blockStartM,                        // cumulative FIT distance at block start
+        blockDistM,                                   // distance covered in this block
+      });
+    }
+    return out;
+  }, [fitData?.movingPowerSeries, fitData?.movingHRSeries, fitData?.movingDistSeries, athlete.ftp]);
+
+  const fitOverlay = fitMinStream.length
+    ? buildNutritionOverlay(fitMinStream, actualIntake, athlete, 120, 1) : [];
 
   // CC#8 (Prompt 4B Step 5): per-second FIT-to-GPX alignment. One pass; both
   // bucketByTerrain and perClimbStats consume the same alignment array. Off-
@@ -2921,7 +2963,14 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   // optimization for the cold path is deferred to the perf-focused prompt.
   const alignment = useMemo(() => {
     if (!fitData?.movingGPSPath?.length || !gpxRouteForAlign?._gpxPts?.length) return null;
-    return alignFitToGpx(fitData.movingGPSPath, gpxRouteForAlign._gpxPts);
+    // Backward compat: legacy saved races persisted `_gpxPts` with only
+    // `cumDistM` (parseGPX internal name). `alignFitToGpx` reads `distM` per
+    // its documented contract. Map cumDistM→distM for any point missing it
+    // so old saves work without re-save. Post-fix parseGPX sets both fields,
+    // so new saves bypass this mapping cheaply.
+    const gpxPts = gpxRouteForAlign._gpxPts.map(p =>
+      typeof p.distM === 'number' ? p : { ...p, distM: p.cumDistM ?? 0 });
+    return alignFitToGpx(fitData.movingGPSPath, gpxPts);
   }, [fitData?.movingGPSPath, gpxRouteForAlign?._gpxPts]);
 
   // Terrain analysis — GPX if plan loaded, FIT altitude fallback otherwise
@@ -2936,7 +2985,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         alignment,
       )
     : null;
-  const actualMetrics = fitPowerStream.length ? (() => {
+  const actualMetrics = fitMinStream.length ? (() => {
     // Use pre-computed values from parseFIT — these use the correct 30-sec rolling NP
     // method on raw 1-second data, matching how TrainingPeaks/Garmin calculate NP.
     const avgPwr = fitData.rawAvgPower;
@@ -2981,25 +3030,87 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     return Math.max(0, Math.min(100, Math.round(100 - delta * 200)));
   })() : null;
 
-  // Overlay chart data
-  // Align actual (5-min FIT blocks) and planned (2-min displayStream blocks) by time.
-  // Index-based alignment broke when plan moved to 1-min physics / 2-min display blocks.
-  // Strategy: use fitPowerStream as the time axis (it's the actual ride), and for each
-  // FIT block find the nearest planned displayStream block by time.
-  const planDisplay = selectedPlan?.pacingPlan?.displayStream ?? null;
-  const overlayChartData = fitPowerStream.length
-    ? fitPowerStream.map(fitPt => {
-        let plannedPower = undefined;
-        if (planDisplay && planDisplay.length > 0) {
-          // Find closest displayStream block by time
-          const nearest = planDisplay.reduce((best, pt) =>
-            Math.abs(pt.time - fitPt.time) < Math.abs(best.time - fitPt.time) ? pt : best
-          );
-          plannedPower = nearest.power;
+  // 4C sub-step 2 — Scheme D plan-vs-actual data prep.
+  //
+  // `alignedPlanBlocks`: each plan block annotated with the FIT-distance
+  // range where on-route FIT seconds fell inside the block's GPX-distance
+  // range. `skipped` is true if the rider never visited that block's GPX
+  // range — the plan line will have a natural break there. Built via single
+  // walk over alignment + binary search on block start distances (O(N+M·log B)).
+  const alignedPlanBlocks = useMemo(() => {
+    const ps = selectedPlan?.pacingPlan?.powerStream;
+    if (!ps?.length || !alignment?.length) return null;
+    const totalDistM = (selectedPlan?.route?.totalDistKm ?? 0) * 1000;
+    const blockStartsM = ps.map(b => b.distKm * 1000);
+    const blockEndsM = ps.map((_, i) =>
+      i < ps.length - 1 ? ps[i + 1].distKm * 1000 : totalDistM);
+    const fitMin = new Array(ps.length).fill(Infinity);
+    const fitMax = new Array(ps.length).fill(-Infinity);
+    for (let i = 0; i < alignment.length; i++) {
+      const a = alignment[i];
+      if (!a.onRoute || a.gpxDistM == null) continue;
+      // Largest block index with blockStartsM[idx] <= gpxDistM.
+      let lo = 0, hi = blockStartsM.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (blockStartsM[mid] <= a.gpxDistM) lo = mid;
+        else hi = mid - 1;
+      }
+      if (a.gpxDistM < blockEndsM[lo]) {
+        if (a.fitDistM < fitMin[lo]) fitMin[lo] = a.fitDistM;
+        if (a.fitDistM > fitMax[lo]) fitMax[lo] = a.fitDistM;
+      }
+    }
+    return ps.map((block, i) => ({
+      ...block,
+      fitDistMin: isFinite(fitMin[i]) ? fitMin[i] : null,
+      fitDistMax: isFinite(fitMax[i]) ? fitMax[i] : null,
+      skipped:    !isFinite(fitMin[i]),
+    }));
+  }, [selectedPlan?.pacingPlan, selectedPlan?.route?.totalDistKm, alignment]);
+
+  // Overlay chart data — Scheme D rendering. X-axis is FIT distance; each
+  // row carries actual power + the plan power for whichever aligned plan
+  // block contains this row's FIT distance. Off-route rows fall outside any
+  // block's [fitDistMin, fitDistMax] range and get plannedPower=undefined,
+  // which recharts renders as a break in the plan line. Skipped plan blocks
+  // contribute no rows at all (their FIT range is empty by definition).
+  //
+  // Legacy fallback: when `alignment` is unavailable (saved race without
+  // `_gpxPts` on the route or `movingGPSPath` on the FIT — pre-Prompt-3.5 /
+  // pre-4B-Step-5 saves), `alignedPlanBlocks` is null. Without alignment we
+  // can't position the plan by FIT distance, so we match each FIT minute to
+  // the nearest plan block by **time** — same logic as pre-sub-step-2. The
+  // plan line still renders on the FIT-distance x-axis but its placement is
+  // approximate. Re-saving the race regenerates the missing fields and
+  // upgrades the rendering automatically.
+  const planMin = selectedPlan?.pacingPlan?.powerStream ?? null;
+  const overlayChartData = useMemo(() => {
+    if (!fitMinStream.length) return [];
+    const distScale = imperial ? 1 / 1609.344 : 1 / 1000; // m → mi or km
+    const useAlignment = !!alignedPlanBlocks;
+    return fitMinStream.map(fitPt => {
+      const fitDistDisp = fitPt.fitDistM * distScale;
+      let plannedPower;
+      if (useAlignment) {
+        // Linear scan — ~200 blocks × ~200 chart rows on TDL = 40k cmps.
+        for (const b of alignedPlanBlocks) {
+          if (b.skipped) continue;
+          if (fitPt.fitDistM >= b.fitDistMin && fitPt.fitDistM <= b.fitDistMax) {
+            plannedPower = b.power;
+            break;
+          }
         }
-        return { ...fitPt, actualPower: fitPt.power, plannedPower };
-      })
-    : [];
+      } else if (planMin && planMin.length > 0) {
+        // Legacy time-nearest fallback.
+        const nearest = planMin.reduce((best, pt) =>
+          Math.abs(pt.time - fitPt.time) < Math.abs(best.time - fitPt.time) ? pt : best
+        );
+        plannedPower = nearest.power;
+      }
+      return { ...fitPt, fitDistDisp, actualPower: fitPt.power, plannedPower };
+    });
+  }, [fitMinStream, alignedPlanBlocks, planMin, imperial]);
 
   const alerts = [];
   if (actualMetrics) {
@@ -3164,14 +3275,14 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
           {/* Power zone distribution */}
           <div style={{ marginTop: 4 }}>
             <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>Power Zone Distribution</div>
-            <ZoneComparisonBar actualStream={fitPowerStream} plannedStream={null} ftp={athlete.ftp} />
+            <ZoneComparisonBar actualStream={fitMinStream} plannedStream={null} ftp={athlete.ftp} />
           </div>
         </div>
       )}
 
       {/* Power Analysis — actual as filled area (zone-colored stroke), planned as muted line.
            Gap between the two = delta at a glance. Standalone mode: area only, no planned line. */}
-      {hasPower && fitPowerStream.length > 0 && (() => {
+      {hasPower && fitMinStream.length > 0 && (() => {
         const allVals = overlayChartData.flatMap(d => [d.actualPower || 0, d.plannedPower || 0]).filter(Boolean);
         const yMax = Math.ceil((Math.max(...allVals) * 1.12) / 50) * 50;
         const yMin = Math.max(0, Math.floor((Math.min(...allVals) * 0.88) / 50) * 50);
@@ -3188,8 +3299,10 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="2 4" stroke={T.border} />
-                  <XAxis dataKey="time" tick={{ fill: T.textDim, fontSize: 10 }}
-                    tickFormatter={v => `${Math.floor(v/60)}:${String(v%60).padStart(2,"0")}`} />
+                  {/* 4C sub-step 2: x-axis is FIT distance (km/mi) — Scheme D. */}
+                  <XAxis dataKey="fitDistDisp" type="number" domain={['dataMin', 'dataMax']}
+                    tick={{ fill: T.textDim, fontSize: 10 }}
+                    tickFormatter={v => `${Math.round(v)}${imperial ? "mi" : "km"}`} />
                   <YAxis domain={[yMin, yMax]} tick={{ fill: T.textDim, fontSize: 10 }}
                     width={40} tickFormatter={v => `${v}w`} />
                   <Tooltip content={({ active, payload }) => {
@@ -3200,9 +3313,11 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                     const pct = ap / athlete.ftp;
                     const zLabel = pct < 0.55 ? "Z1" : pct < 0.75 ? "Z2" : pct < 0.85 ? "Z3" : pct < 0.95 ? "Z4" : "Z5";
                     const delta = pp != null ? ap - pp : null;
+                    const distLabel = `${(d?.fitDistDisp ?? 0).toFixed(1)}${imperial ? "mi" : "km"}`;
+                    const timeLabel = minsToHHMM(d?.time || 0);
                     return (
                       <div style={{ background: T.surface, border: `1px solid ${T.border}`, padding: "8px 12px", borderRadius: 4, fontSize: 12 }}>
-                        <div style={{ color: T.textMuted, marginBottom: 4 }}>{minsToHHMM(d?.time || 0)}</div>
+                        <div style={{ color: T.textMuted, marginBottom: 4 }}>{distLabel} · {timeLabel}</div>
                         <div style={{ color: zoneColor(pct) }}>
                           Actual: <strong>{ap}w</strong>
                           <span style={{ fontSize: 10, color: T.textDim, marginLeft: 5 }}>{Math.round(pct*100)}% FTP · {zLabel}</span>
@@ -3225,13 +3340,17 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                     fill="url(#actualAreaFill)"
                     dot={false} activeDot={{ r: 3, fill: T.blue }}
                   />
-                  {/* Planned — thin muted line, no fill. Recedes behind actual. */}
+                  {/* Planned — thin muted line, no fill. Recedes behind actual.
+                      4C sub-step 2: connectNulls={false} so plan line breaks
+                      naturally at off-route stretches and skipped blocks
+                      (where plannedPower is undefined for that x position). */}
                   {selectedPlan && (
                     <Line dataKey="plannedPower" name="Planned"
                       type="monotone"
                       stroke="rgba(0,212,255,0.35)" strokeWidth={1.5}
                       strokeDasharray="5 3"
                       dot={false}
+                      connectNulls={false}
                     />
                   )}
                 </ComposedChart>
@@ -3259,7 +3378,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                 Power Zone Distribution
               </div>
               <ZoneComparisonBar
-                actualStream={fitPowerStream}
+                actualStream={fitMinStream}
                 plannedStream={selectedPlan?.pacingPlan?.powerStream ?? null}
                 ftp={athlete.ftp}
               />
@@ -3267,7 +3386,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
 
             {/* Fade Analysis — only shown when a plan is selected */}
             {selectedPlan && (() => {
-              // blockMins: minutes per block in the stream (1-min for powerStream, 5-min for fitPowerStream)
+              // blockMins: minutes per block in the stream (1-min on both sides post-4C sub-step 1).
               // Rolling window = 30 seconds worth of blocks, minimum 1
               const npOfStream = (stream, blockMins) => {
                 if (!stream || stream.length === 0) return 0;
@@ -3292,8 +3411,8 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               };
 
               const actualThirds  = splitThirds(fitData.movingPowerSeries.map((p, i) => ({ power: p, time: i / 60 })));
-              // Use powerStream (1-min blocks) for planned thirds — displayStream is 2-min averages
-              // which pre-flatten variance and systematically deflate NP per third
+              // 4C sub-step 1: planned thirds use the canonical 1-min powerStream
+              // (the prior 2-min displayStream averaged variance away and deflated NP).
               const plannedThirds = splitThirds(selectedPlan.pacingPlan.powerStream);
               const actualNPs  = actualThirds.map(t => npOfStream(t, 1/60));  // movingPowerSeries = 1-second (1/60 min)
               const plannedNPs = plannedThirds.map(t => npOfStream(t, 1));    // powerStream = 1-min blocks
@@ -3404,31 +3523,31 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
            Power-dependent: every section in this card (Cardiac Efficiency,
            Threshold Exposure, Effort vs Plan, Anaerobic Reserve) is built on
            the moving power series. Hide the entire card when no power data. */}
-      {hasPower && fitPowerStream.length > 0 && fitPowerStream.some(b => b.hr > 0) && (() => {
+      {hasPower && fitMinStream.length > 0 && fitMinStream.some(b => b.hr > 0) && (() => {
         const maxHR    = athlete.maxHR || 185;
         const rawSeries = fitData?.movingPowerSeries ?? [];
+        const rawHR     = fitData?.movingHRSeries ?? [];
         const n = rawSeries.length;
 
-        // Split movingPowerSeries into thirds by index (= moving-time thirds)
+        // Split per-second moving series into thirds by index (= moving-time thirds).
+        // 4C sub-step 1: HR is per-second too (`movingHRSeries`); the prior
+        // "HR only stored at block level" comment was stale.
         const third = Math.floor(n / 3);
         const rawThirds = [
           rawSeries.slice(0, third),
           rawSeries.slice(third, third * 2),
           rawSeries.slice(third * 2),
         ];
+        const hrThirds_secs = [
+          rawHR.slice(0, third),
+          rawHR.slice(third, third * 2),
+          rawHR.slice(third * 2),
+        ];
 
-        // HR still comes from fitPowerStream blocks (HR only stored at block level)
-        const fitMaxTime = fitPowerStream[fitPowerStream.length - 1]?.time ?? 0;
-        const ft1 = fitMaxTime / 3, ft2 = fitMaxTime * 2 / 3;
-        const hrT1 = fitPowerStream.filter(pt => pt.time < ft1);
-        const hrT2 = fitPowerStream.filter(pt => pt.time >= ft1 && pt.time < ft2);
-        const hrT3 = fitPowerStream.filter(pt => pt.time >= ft2);
-        const hrThirdsBlocks = [hrT1, hrT2, hrT3];
-
-        const avgHR  = arr => { const v = arr.map(b => b.hr).filter(h => h > 0); return v.length ? Math.round(v.reduce((s,h)=>s+h,0)/v.length) : 0; };
+        const avgHR  = arr => { const v = arr.filter(h => h > 0); return v.length ? Math.round(v.reduce((s,h)=>s+h,0)/v.length) : 0; };
         const avgPwr = arr => arr.length ? Math.round(arr.filter(p => p > 0).reduce((s,p) => s + p, 0) / arr.filter(p => p > 0).length) : 0;
 
-        const hrThirds  = hrThirdsBlocks.map(avgHR);
+        const hrThirds  = hrThirds_secs.map(avgHR);
         const pwrThirds = rawThirds.map(avgPwr);
         // HR zone color by % of maxHR
         const hrZoneColor = (hr) => {
@@ -3957,7 +4076,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       })()}
 
       {/* ── RACE INTELLIGENCE ────────────────────────────────────────────── */}
-      {terrainBuckets && fitPowerStream.length > 0 && (() => {
+      {terrainBuckets && fitMinStream.length > 0 && (() => {
         const { climb, flat, descent } = terrainBuckets;
         const hasGPX = !!(selectedPlan?.route?.segmentGrades?.length);
         const FTP = athlete.ftp;
@@ -4178,7 +4297,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
 
             {/* ── Climb Pacing Table — power-dependent (NP per climb, W'bal at exit) ── */}
             {hasPower && perClimbStats.length > 0 && (() => {
-              const hasPlan = !!(selectedPlan?.pacingPlan?.displayStream);
+              const hasPlan = !!(selectedPlan?.pacingPlan?.powerStream);
               const catDotColor = (cat) => {
                 if (cat === "wall")   return T.red;
                 if (cat === "steep")  return T.gold;
@@ -4186,18 +4305,17 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               };
               const plannedNPForClimb = (cs) => {
                 if (!hasPlan) return null;
-                const ds = selectedPlan.pacingPlan.displayStream;
+                // 4C sub-step 1: consume powerStream (1-min) directly. Was displayStream (2-min).
+                const ds = selectedPlan.pacingPlan.powerStream;
                 const totalPlanMin = ds[ds.length - 1]?.time ?? 1;
                 const gpxStats = selectedPlan.route;
                 const startFrac = cs.startDistKm / (gpxStats.totalDistKm || 1);
                 const endFrac   = (cs.startDistKm + cs.lengthKm) / (gpxStats.totalDistKm || 1);
                 const t1 = startFrac * totalPlanMin;
                 const t2 = endFrac   * totalPlanMin;
-                // displayStream blocks are 2-min wide. A short climb may fall entirely
-                // between two block time points, so strict t1<=b.time<=t2 returns empty.
-                // Expand window by one block width (2 min) each side to guarantee at least
-                // one block is captured for any climb ≥ 1 min on the course.
-                const BLOCK_MIN = 2;
+                // Expand window by one block width (1 min) each side to guarantee at
+                // least one block is captured for any climb ≥ 1 min on the course.
+                const BLOCK_MIN = 1;
                 const blocks = ds.filter(b => b.time >= t1 - BLOCK_MIN && b.time <= t2 + BLOCK_MIN);
                 if (!blocks.length) return null;
                 const powers = blocks.map(b => b.power).filter(p => p > 0);
@@ -4426,7 +4544,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       })()}
 
       {/* Nutrition Analysis */}
-      {fitPowerStream.length > 0 && (
+      {fitMinStream.length > 0 && (
         <div className="card">
           <div className="card-header">Nutrition Analysis</div>
           <IntakeForm products={products} onAdd={e => setActualIntake(prev => [...prev, e].sort((a, b) => a.time - b.time))} maxTime={fitData?.durationMin || 360} />

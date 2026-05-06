@@ -10,24 +10,24 @@
 //  • Per-second simulation along the route — each second computes target
 //    speed → grade-corrected watts → cap/floor application → actual speed
 //    → distance advance.
-//  • `powerStream` (1-min blocks) preserved for backward compatibility with
-//    chart consumers / table renderers / segment NP calculations.
-//  • `powerStreamPerSec` is the new authoritative output for canonical
-//    physics: NP via `computeNP`, W'bal via `buildWbal({ blockSeconds: 1 })`.
-//    Eager (always populated) but excluded from IndexedDB persistence by the
-//    caller — recomputed on plan load.
-//  • `displayStream` (2-min) now aggregated from per-second samples directly
-//    rather than from the 1-min blocks — finer underlying resolution flows
-//    through to chart rendering.
+//  • `powerStream` (1-min blocks) is the single chart/table aggregation. Per
+//    the rebuild's "visuals at 1-min, math at 1-sec" principle (4C sub-step 1),
+//    the prior 2-min `displayStream` was retired — chart consumers now read
+//    `powerStream` directly. `peakGrade` (per-block max grade) was promoted
+//    from the retired displayStream so ElevPowerChart's elevation overlay keeps
+//    its terrain-peak emphasis.
+//  • `powerStreamPerSec` is the authoritative output for canonical physics:
+//    NP via `computeNP`, W'bal via `buildWbal({ blockSeconds: 1 })`. Eager
+//    (always populated) but excluded from IndexedDB persistence by the caller
+//    — recomputed on plan load.
 //  • Module-level WeakMap caches gpxStats-derived invariants (segment grade
 //    table, bearing table, distance bin lookups) so flatIFForTargetNP's
 //    30-iteration binary search doesn't rebuild them per call.
 //
-// Locked output shape (Group H + 4B addition):
+// Locked output shape (4C sub-step 1 — displayStream retired):
 //   {
-//     powerStream:        [{time, power, pctFTP, grade, distKm, speedKph, blockTimeMin}],
-//     powerStreamPerSec:  [{t, power, distM, grade}],          // CC#7 (4B)
-//     displayStream:      [{time, power, pctFTP, grade, peakGrade, distKm, speedKph}],
+//     powerStream:        [{time, power, pctFTP, grade, peakGrade, distKm, speedKph, blockTimeMin}],
+//     powerStreamPerSec:  [{t, time, power, distM, distKm, grade}],
 //     estimatedDurationMin, avgSpeedKph, avgPower,
 //     normalizedPower, tss, ifActual, _physicsOnlyDurationMin,
 //   }
@@ -50,7 +50,6 @@ const WARMUP_START_FACTOR   = 0.7;   // initial multiplier on target speed
 const MIN_SPEED_MS          = 0.5;   // lower bound passed to powerAtSpeed for stability
 const STALL_SPEED_MS        = 0.3;   // below this we treat the second as a stall (no advance)
 const EMPTY_ROUTE_FALLBACK_MIN = 180; // when speed solver fails entirely
-const DISPLAY_BLOCK_MIN     = 2;     // chart aggregation: 2-min display blocks
 const DIST_BIN_M            = 100;   // distance-bin resolution for cached grade/bearing lookup
 const MAX_SIM_SEC           = 24 * 3600; // hard ceiling — guards against pathological stalls
 
@@ -267,7 +266,6 @@ export function buildPowerStream(
     return {
       powerStream: [],
       powerStreamPerSec: [],
-      displayStream: [],
       estimatedDurationMin: EMPTY_ROUTE_FALLBACK_MIN,
       avgSpeedKph: 0,
       avgPower: 0,
@@ -285,9 +283,12 @@ export function buildPowerStream(
 
   const actualDurationMin = totalSec / 60;
 
-  // ── Aggregate per-second → 1-min powerStream (legacy contract) ────────
-  // Charts, segment-NP code, and the per-block table consume this shape.
-  // 1-min blocks formed by averaging 60 consecutive per-second samples.
+  // ── Aggregate per-second → 1-min powerStream (single chart aggregation) ─
+  // Charts, segment-NP code, the per-block table, and nutrition overlay all
+  // consume this. 1-min blocks formed by averaging 60 consecutive per-second
+  // samples. `peakGrade` (per-block max grade) was promoted from the retired
+  // 2-min displayStream so ElevPowerChart's elevation overlay keeps its
+  // terrain-peak emphasis.
   const powerStream = [];
   const numBlocks = Math.ceil(totalSec / 60);
   let cumMin = 0;
@@ -297,46 +298,21 @@ export function buildPowerStream(
     const slice = perSec.slice(start, end);
     if (slice.length === 0) break;
     const avgP = Math.round(slice.reduce((a, p) => a + p.power, 0) / slice.length);
-    const avgGrade = slice.reduce((a, p) => a + p.grade, 0) / slice.length;
+    const avgGradeDecimal = slice.reduce((a, p) => a + p.grade, 0) / slice.length;
+    const peakGradeDecimal = slice.reduce((a, p) => Math.max(a, p.grade), -Infinity);
     const avgSpeedMs = slice.reduce((a, p) => a + p.speedMs, 0) / slice.length;
     const blockTimeMin = slice.length / 60;
     powerStream.push({
       time: Math.round(cumMin),
       power: avgP,
       pctFTP: avgP / athlete.ftp,
-      grade: Math.round(avgGrade * 1000) / 10,    // %, 1 decimal
+      grade: Math.round(avgGradeDecimal * 1000) / 10,    // %, 1 decimal
+      peakGrade: Math.round(peakGradeDecimal * 1000) / 10,
       distKm: Math.round(slice[0].distM / 100) / 10,
       speedKph: Math.round(avgSpeedMs * 3.6 * 10) / 10,
       blockTimeMin,
     });
     cumMin += blockTimeMin;
-  }
-
-  // ── Aggregate per-second → 2-min displayStream (chart only) ────────────
-  const displayStream = [];
-  for (let b = 0; b < numBlocks; b += DISPLAY_BLOCK_MIN) {
-    const start = b * 60;
-    const end = Math.min(start + DISPLAY_BLOCK_MIN * 60, totalSec);
-    const slice = perSec.slice(start, end);
-    if (slice.length === 0) break;
-    // Convention C: avg includes coasting zeros — match NP timeline.
-    // (Same convention as legacy displayStream; preserved for chart parity.)
-    const sliceActive = slice.filter(p => p.power > 0);
-    const avgDisplayPower = sliceActive.length > 0
-      ? Math.round(sliceActive.reduce((a, p) => a + p.power, 0) / sliceActive.length)
-      : 0;
-    const peakGradeDecimal = slice.reduce((a, p) => Math.max(a, p.grade), -Infinity);
-    const avgGradeDecimal = slice.reduce((a, p) => a + p.grade, 0) / slice.length;
-    const avgSpeedMs = slice.reduce((a, p) => a + p.speedMs, 0) / slice.length;
-    displayStream.push({
-      time: b,
-      power: avgDisplayPower,
-      pctFTP: avgDisplayPower / athlete.ftp,
-      grade: Math.round(avgGradeDecimal * 1000) / 10,
-      peakGrade: Math.round(peakGradeDecimal * 1000) / 10,
-      distKm: Math.round(slice[0].distM / 100) / 10,
-      speedKph: Math.round(avgSpeedMs * 3.6 * 10) / 10,
-    });
   }
 
   // ── Final metrics from per-second stream (canonical) ──────────────────
@@ -370,9 +346,8 @@ export function buildPowerStream(
   }));
 
   return {
-    powerStream,           // 1-min blocks — legacy chart/table consumers
+    powerStream,           // 1-min blocks — chart/table/nutrition consumers
     powerStreamPerSec,     // 1-sec stream — canonical math (CC#7)
-    displayStream,         // 2-min aggregates — charts only
     estimatedDurationMin: Math.round(actualDurationMin),
     avgSpeedKph: Math.round((gpxStats.totalDistKm / (actualDurationMin / 60)) * 10) / 10,
     avgPower,

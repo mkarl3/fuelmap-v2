@@ -14,7 +14,6 @@
 // ParsedFIT shape (matches legacy parseFIT output, plus additive fields):
 //   {
 //     // ── Existing fields (used by App.jsx today) ─────────────────────
-//     blockMap:          { [movingMinKey: string]: { powers: number[], hrs: number[] } },
 //     elapsedMin:        number,   // wall-clock minutes (last ts − first ts)
 //     movingMin:         number,   // elapsed minus stopped seconds (rounded to min)
 //     stoppedMin:        number,
@@ -39,9 +38,10 @@
 //   }
 //
 // Critical: the post-processing math (NP rolling window, stop detection,
-// elapsed/moving/stopped separation, blockMap construction) is identical to
-// the legacy parser — copied verbatim. Only the source of raw 1-Hz records
-// changes (binary parser → fit-file-parser package).
+// elapsed/moving/stopped separation) is identical to the legacy parser.
+// Only the source of raw 1-Hz records changes (binary parser →
+// fit-file-parser package). The legacy 5-min `blockMap` aggregation was
+// retired in 4C sub-step 1; consumers build their own 1-min aggregation.
 
 import FitParser from 'fit-file-parser';
 
@@ -370,21 +370,11 @@ export async function parseFIT(buffer) {
     ? Math.round(Math.pow(rollingAvgs.reduce((s, p) => s + Math.pow(p, 4), 0) / rollingAvgs.length, 0.25))
     : 0;
 
-  // ── 5-min block map keyed by MOVING time minutes ─────────────────────────
-  // Kept identical to legacy parser for buildPowerStreamFromFIT compatibility.
-  const blockSize = 300; // seconds per block
-  const blockMap = {};
-  let movingOffset = 0;
-  for (let t = 0; t <= elapsedSec; t++) {
-    if (stoppedOffsets.has(t)) continue;
-    const r = byTs[t];
-    if (!r) { movingOffset++; continue; }
-    const block = Math.floor(movingOffset / blockSize) * 5; // key = moving minutes
-    if (!blockMap[block]) blockMap[block] = { powers: [], hrs: [] };
-    blockMap[block].powers.push(r.power !== null ? r.power : 0);
-    blockMap[block].hrs.push(r.hr !== null ? r.hr : 0);
-    movingOffset++;
-  }
+  // (4C sub-step 1: the 5-min `blockMap` aggregation lived here as legacy
+  //  feed for `buildPowerStreamFromFIT`. Both have been retired in favor of
+  //  consumers building their own 1-min aggregation directly from
+  //  `movingPowerSeries` per the rebuild's "visuals at 1-min, math at 1-sec"
+  //  principle.)
 
   // ── First valid GPS coordinate (used to align FIT start to GPX route) ────
   let firstGPS = null;
@@ -420,8 +410,7 @@ export async function parseFIT(buffer) {
   }).filter(l => l.startTimeMs !== null);
 
   return {
-    // Existing fields (must match legacy parseFIT exactly)
-    blockMap,
+    // Existing fields (must match legacy parseFIT exactly, modulo retirements)
     elapsedMin,
     movingMin,
     stoppedMin,
