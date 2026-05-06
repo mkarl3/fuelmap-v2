@@ -685,11 +685,31 @@ function buildTerrainStream(movingPowerSeries, movingAltSeries, movingDistSeries
 // loop-course start/end ambiguity is resolved by per-point nearest-neighbor,
 // and off-route seconds are flagged so they don't smear onto planned-route
 // terrain stats.
-function bucketByTerrain(movingPowerSeries, movingAltSeries, movingDistSeries, movingHRSeries, gpxRoute, ftp, alignment) {
+function bucketByTerrain(movingPowerSeries, movingAltSeries, movingDistSeries, movingHRSeries, gpxRoute, ftp, alignment, thirdsByRouteDistance = null) {
   const terrain = buildTerrainStream(movingPowerSeries, movingAltSeries, movingDistSeries, gpxRoute, alignment);
   const n = movingPowerSeries.length;
+  // 4C sub-step 6 — third-index lookup. When `thirdsByRouteDistance` is
+  // provided (route-distance-bucketed sets of indices), use it so terrain
+  // thirds match every other "thirds" card on the page. Off-route seconds
+  // (not in any route-third set) get assigned to the nearest moving-time
+  // third as a non-disruptive fallback. When unavailable, legacy moving-time
+  // index thirds.
   const t1End = Math.floor(n / 3);
   const t2End = Math.floor(2 * n / 3);
+  let thirdIdxAt;
+  if (thirdsByRouteDistance) {
+    const memberOf = new Int8Array(n).fill(-1);
+    for (let t = 0; t < 3; t++) {
+      for (const idx of thirdsByRouteDistance[t]) memberOf[idx] = t;
+    }
+    thirdIdxAt = (i) => {
+      const t = memberOf[i];
+      if (t >= 0) return t;
+      return i < t1End ? 0 : i < t2End ? 1 : 2; // off-route: time-fallback
+    };
+  } else {
+    thirdIdxAt = (i) => i < t1End ? 0 : i < t2End ? 1 : 2;
+  }
 
   const buckets = {
     climb:   { npPowers: [], powers: [], speeds: [], hrs: [], thirds: [{npPowers:[],powers:[],speeds:[]},{npPowers:[],powers:[],speeds:[]},{npPowers:[],powers:[],speeds:[]}] },
@@ -701,7 +721,7 @@ function bucketByTerrain(movingPowerSeries, movingAltSeries, movingDistSeries, m
     const t = terrain[i];
     const p = movingPowerSeries[i];
     const spd = movingDistSeries?.[i] || 0;
-    const thirdIdx = i < t1End ? 0 : i < t2End ? 1 : 2;
+    const thirdIdx = thirdIdxAt(i);
     // npPowers includes zeros — rolling window must operate on contiguous seconds
     // to correctly weight recovery/coasting within each terrain type
     buckets[t].npPowers.push(p);
@@ -2973,7 +2993,31 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     return alignFitToGpx(fitData.movingGPSPath, gpxPts);
   }, [fitData?.movingGPSPath, gpxRouteForAlign?._gpxPts]);
 
-  // Terrain analysis — GPX if plan loaded, FIT altitude fallback otherwise
+  // 4C sub-step 6 — route-distance thirds. Single derivation drives every
+  // fade-analysis section (Fade Analysis NP, Effort vs Plan IF, Cardiac
+  // Efficiency, Threshold Exposure, Terrain × thirds, W'bal peak-burn third)
+  // so cards rendered next to each other agree on what "first third" means.
+  // Off-route seconds excluded from each set (no GPX position to bucket by).
+  // When alignment is unavailable, returns null and consumers fall back to
+  // legacy moving-time index thirds.
+  const thirdsByRouteDistance = useMemo(() => {
+    if (!alignment?.length || !selectedPlan?.route?.totalDistKm) return null;
+    const totalRouteM = selectedPlan.route.totalDistKm * 1000;
+    const t1End = totalRouteM / 3;
+    const t2End = (totalRouteM * 2) / 3;
+    const sets = [[], [], []];
+    for (let i = 0; i < alignment.length; i++) {
+      const a = alignment[i];
+      if (!a.onRoute || a.gpxDistM == null) continue;
+      const idx = a.gpxDistM < t1End ? 0 : a.gpxDistM < t2End ? 1 : 2;
+      sets[idx].push(i);
+    }
+    return sets;
+  }, [alignment, selectedPlan?.route?.totalDistKm]);
+
+  // Terrain analysis — GPX if plan loaded, FIT altitude fallback otherwise.
+  // 4C sub-step 6: thirdsByRouteDistance threaded through so per-bucket thirds
+  // align with all other thirds on the page.
   const terrainBuckets = fitData?.movingPowerSeries?.length
     ? bucketByTerrain(
         fitData.movingPowerSeries,
@@ -2983,6 +3027,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         gpxRouteForAlign,
         athlete.ftp,
         alignment,
+        thirdsByRouteDistance,
       )
     : null;
   const actualMetrics = fitMinStream.length ? (() => {
@@ -3069,37 +3114,114 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     }));
   }, [selectedPlan?.pacingPlan, selectedPlan?.route?.totalDistKm, alignment]);
 
+  // 4C sub-step 4 — off-route span detection. Walks `alignment` to find
+  // contiguous runs of off-route seconds, classified as pre/mid/post relative
+  // to the rider's first/last on-route second. Each span is rendered as a
+  // gray <ReferenceArea> on the Power Analysis chart so the user can see
+  // pre-route warmup, mid-route detours, and post-route cooldown at a glance.
+  // Tiny spans (< MIN_SPAN_M, GPS jitter) are filtered out.
+  const offRouteSpans = useMemo(() => {
+    if (!alignment?.length) return null;
+    const MIN_SPAN_M = 50; // suppress single-point GPS jitters
+    let firstOnRouteIdx = -1, lastOnRouteIdx = -1;
+    for (let i = 0; i < alignment.length; i++) {
+      if (alignment[i].onRoute) {
+        if (firstOnRouteIdx === -1) firstOnRouteIdx = i;
+        lastOnRouteIdx = i;
+      }
+    }
+    if (firstOnRouteIdx === -1) return []; // no on-route seconds at all
+    const spans = [];
+    let runStart = -1;
+    for (let i = 0; i <= alignment.length; i++) {
+      const off = i < alignment.length && !alignment[i].onRoute;
+      if (off && runStart === -1) runStart = i;
+      else if (!off && runStart !== -1) {
+        const startFitM = alignment[runStart].fitDistM;
+        const endFitM = i < alignment.length
+          ? alignment[i].fitDistM
+          : alignment[alignment.length - 1].fitDistM;
+        const lengthM = endFitM - startFitM;
+        if (lengthM >= MIN_SPAN_M) {
+          const category =
+            i - 1 < firstOnRouteIdx ? 'pre' :
+            runStart > lastOnRouteIdx ? 'post' :
+            'mid';
+          spans.push({ startFitM, endFitM, lengthM, category });
+        }
+        runStart = -1;
+      }
+    }
+    return spans;
+  }, [alignment]);
+
   // Overlay chart data — Scheme D rendering. X-axis is FIT distance; each
-  // row carries actual power + the plan power for whichever aligned plan
-  // block contains this row's FIT distance. Off-route rows fall outside any
-  // block's [fitDistMin, fitDistMax] range and get plannedPower=undefined,
-  // which recharts renders as a break in the plan line. Skipped plan blocks
-  // contribute no rows at all (their FIT range is empty by definition).
+  // row carries actual power + the plan power for whichever plan block
+  // covers the rider's GPX-distance position during that FIT minute.
+  //
+  // Mapping: each fitMinStream row corresponds to alignment seconds
+  // [blockIdx*60 .. (blockIdx+1)*60). For on-route seconds in that range,
+  // we average their gpxDistM to get the rider's representative GPX
+  // position during this minute. Then we find the plan block whose GPX
+  // range contains that position. Off-route minutes (no on-route seconds)
+  // get plannedPower=undefined → recharts renders a break.
+  //
+  // Why not bucket by `block.fitDistMin/fitDistMax`: on rides with
+  // non-monotonic alignment (rider returns near earlier route territory,
+  // or goes off-route and comes back close to where they left), a block's
+  // fitDistMin/fitDistMax extremes can span most of the ride and every
+  // fitPt matches that one block — producing a flat plan line.
   //
   // Legacy fallback: when `alignment` is unavailable (saved race without
   // `_gpxPts` on the route or `movingGPSPath` on the FIT — pre-Prompt-3.5 /
-  // pre-4B-Step-5 saves), `alignedPlanBlocks` is null. Without alignment we
-  // can't position the plan by FIT distance, so we match each FIT minute to
-  // the nearest plan block by **time** — same logic as pre-sub-step-2. The
-  // plan line still renders on the FIT-distance x-axis but its placement is
-  // approximate. Re-saving the race regenerates the missing fields and
-  // upgrades the rendering automatically.
+  // pre-4B-Step-5 saves), match each FIT minute to the nearest plan block
+  // by **time**. Approximate positioning; re-save upgrades it automatically.
   const planMin = selectedPlan?.pacingPlan?.powerStream ?? null;
+  // Plan-block GPX bounds, computed once per plan: each block i covers
+  // gpxDistM [blockStartsM[i], blockEndsM[i]).
+  const planBlockBounds = useMemo(() => {
+    if (!planMin?.length) return null;
+    const totalDistM = (selectedPlan?.route?.totalDistKm ?? 0) * 1000;
+    const startsM = planMin.map(b => b.distKm * 1000);
+    const endsM = planMin.map((_, i) =>
+      i < planMin.length - 1 ? planMin[i + 1].distKm * 1000 : totalDistM);
+    return { startsM, endsM };
+  }, [planMin, selectedPlan?.route?.totalDistKm]);
+
   const overlayChartData = useMemo(() => {
     if (!fitMinStream.length) return [];
     const distScale = imperial ? 1 / 1609.344 : 1 / 1000; // m → mi or km
-    const useAlignment = !!alignedPlanBlocks;
-    return fitMinStream.map(fitPt => {
+    const useAlignment = !!alignment && !!planBlockBounds;
+    return fitMinStream.map((fitPt, blockIdx) => {
       const fitDistDisp = fitPt.fitDistM * distScale;
       let plannedPower;
+      let offRoute = false;
       if (useAlignment) {
-        // Linear scan — ~200 blocks × ~200 chart rows on TDL = 40k cmps.
-        for (const b of alignedPlanBlocks) {
-          if (b.skipped) continue;
-          if (fitPt.fitDistM >= b.fitDistMin && fitPt.fitDistM <= b.fitDistMax) {
-            plannedPower = b.power;
-            break;
+        // Average gpxDistM of on-route seconds within this minute.
+        const startSec = blockIdx * 60;
+        const endSec = Math.min(startSec + 60, alignment.length);
+        let sumGpx = 0, count = 0;
+        for (let s = startSec; s < endSec; s++) {
+          const a = alignment[s];
+          if (a && a.onRoute && a.gpxDistM != null) {
+            sumGpx += a.gpxDistM;
+            count++;
           }
+        }
+        if (count > 0) {
+          const avgGpxDistM = sumGpx / count;
+          // Binary search for plan block containing avgGpxDistM.
+          const { startsM, endsM } = planBlockBounds;
+          let lo = 0, hi = startsM.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (startsM[mid] <= avgGpxDistM) lo = mid;
+            else hi = mid - 1;
+          }
+          if (avgGpxDistM < endsM[lo]) plannedPower = planMin[lo].power;
+        } else {
+          // Entire minute off-route — flag for tooltip; plannedPower stays undefined.
+          offRoute = true;
         }
       } else if (planMin && planMin.length > 0) {
         // Legacy time-nearest fallback.
@@ -3108,9 +3230,9 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         );
         plannedPower = nearest.power;
       }
-      return { ...fitPt, fitDistDisp, actualPower: fitPt.power, plannedPower };
+      return { ...fitPt, fitDistDisp, actualPower: fitPt.power, plannedPower, offRoute };
     });
-  }, [fitMinStream, alignedPlanBlocks, planMin, imperial]);
+  }, [fitMinStream, alignment, planMin, planBlockBounds, imperial]);
 
   const alerts = [];
   if (actualMetrics) {
@@ -3299,6 +3421,18 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="2 4" stroke={T.border} />
+                  {/* 4C sub-step 4: off-route bands — pre-route warmup,
+                      mid-route detour, post-route cooldown. Rendered before
+                      Area/Line so they sit behind the data. */}
+                  {offRouteSpans?.map((span, i) => {
+                    const distScale = imperial ? 1 / 1609.344 : 1 / 1000;
+                    return (
+                      <ReferenceArea key={`offrt-${i}`}
+                        x1={span.startFitM * distScale} x2={span.endFitM * distScale}
+                        fill={T.textMuted} fillOpacity={0.10}
+                        stroke="none" />
+                    );
+                  })}
                   {/* 4C sub-step 2: x-axis is FIT distance (km/mi) — Scheme D. */}
                   <XAxis dataKey="fitDistDisp" type="number" domain={['dataMin', 'dataMax']}
                     tick={{ fill: T.textDim, fontSize: 10 }}
@@ -3310,6 +3444,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                     const d = payload[0]?.payload;
                     const ap = d?.actualPower || 0;
                     const pp = d?.plannedPower;
+                    const isOffRoute = !!d?.offRoute;
                     const pct = ap / athlete.ftp;
                     const zLabel = pct < 0.55 ? "Z1" : pct < 0.75 ? "Z2" : pct < 0.85 ? "Z3" : pct < 0.95 ? "Z4" : "Z5";
                     const delta = pp != null ? ap - pp : null;
@@ -3322,7 +3457,11 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                           Actual: <strong>{ap}w</strong>
                           <span style={{ fontSize: 10, color: T.textDim, marginLeft: 5 }}>{Math.round(pct*100)}% FTP · {zLabel}</span>
                         </div>
-                        {pp != null && (
+                        {isOffRoute ? (
+                          <div style={{ color: T.textDim, marginTop: 2, fontStyle: 'italic' }}>
+                            Off Route
+                          </div>
+                        ) : pp != null && (
                           <div style={{ color: T.textMuted, marginTop: 2 }}>
                             Planned: {pp}w
                             <span style={{ marginLeft: 8, color: delta > 0 ? T.green : delta < 0 ? T.red : T.textDim, fontFamily: "Barlow Condensed", fontWeight: 700 }}>
@@ -3399,7 +3538,12 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                 return Math.round(Math.pow(rolling.reduce((s, p) => s + p ** 4, 0) / rolling.length, 0.25));
               };
 
-              const splitThirds = (stream) => {
+              // 4C sub-step 6 — bucket BOTH actual and plan by route-distance
+              // thirds. Same boundaries on both sides so they're apples-to-apples
+              // (and consistent with every other "thirds" section on the page).
+              // Falls back to legacy moving-time index thirds when alignment is
+              // unavailable (legacy save with no _gpxPts/movingGPSPath).
+              const splitTimeThirds = (stream) => {
                 if (!stream || stream.length === 0) return [[], [], []];
                 const maxTime = stream[stream.length - 1].time;
                 const t1 = maxTime / 3, t2 = maxTime * 2 / 3;
@@ -3409,11 +3553,24 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                   stream.filter(pt => pt.time >= t2),
                 ];
               };
+              const splitPlanByRouteThirds = (planStream) => {
+                if (!planStream?.length || !selectedPlan?.route?.totalDistKm) return splitTimeThirds(planStream);
+                const totalKm = selectedPlan.route.totalDistKm;
+                const t1Km = totalKm / 3, t2Km = totalKm * 2 / 3;
+                return [
+                  planStream.filter(pt => pt.distKm < t1Km),
+                  planStream.filter(pt => pt.distKm >= t1Km && pt.distKm < t2Km),
+                  planStream.filter(pt => pt.distKm >= t2Km),
+                ];
+              };
 
-              const actualThirds  = splitThirds(fitData.movingPowerSeries.map((p, i) => ({ power: p, time: i / 60 })));
-              // 4C sub-step 1: planned thirds use the canonical 1-min powerStream
-              // (the prior 2-min displayStream averaged variance away and deflated NP).
-              const plannedThirds = splitThirds(selectedPlan.pacingPlan.powerStream);
+              const rps = fitData.movingPowerSeries;
+              const actualThirds = thirdsByRouteDistance
+                ? thirdsByRouteDistance.map(idxs => idxs.map(i => ({ power: rps[i] })))
+                : splitTimeThirds(rps.map((p, i) => ({ power: p, time: i / 60 })));
+              const plannedThirds = thirdsByRouteDistance
+                ? splitPlanByRouteThirds(selectedPlan.pacingPlan.powerStream)
+                : splitTimeThirds(selectedPlan.pacingPlan.powerStream);
               const actualNPs  = actualThirds.map(t => npOfStream(t, 1/60));  // movingPowerSeries = 1-second (1/60 min)
               const plannedNPs = plannedThirds.map(t => npOfStream(t, 1));    // powerStream = 1-min blocks
 
@@ -3529,20 +3686,27 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         const rawHR     = fitData?.movingHRSeries ?? [];
         const n = rawSeries.length;
 
-        // Split per-second moving series into thirds by index (= moving-time thirds).
-        // 4C sub-step 1: HR is per-second too (`movingHRSeries`); the prior
-        // "HR only stored at block level" comment was stale.
-        const third = Math.floor(n / 3);
-        const rawThirds = [
-          rawSeries.slice(0, third),
-          rawSeries.slice(third, third * 2),
-          rawSeries.slice(third * 2),
-        ];
-        const hrThirds_secs = [
-          rawHR.slice(0, third),
-          rawHR.slice(third, third * 2),
-          rawHR.slice(third * 2),
-        ];
+        // 4C sub-step 6 — bucket per-second power and HR by route-distance
+        // thirds when alignment is available; fall back to moving-time index
+        // thirds otherwise. All "thirds" sections on this card share the same
+        // boundaries so they read consistently.
+        let rawThirds, hrThirds_secs;
+        if (thirdsByRouteDistance) {
+          rawThirds = thirdsByRouteDistance.map(idxs => idxs.map(i => rawSeries[i]));
+          hrThirds_secs = thirdsByRouteDistance.map(idxs => idxs.map(i => rawHR[i]));
+        } else {
+          const third = Math.floor(n / 3);
+          rawThirds = [
+            rawSeries.slice(0, third),
+            rawSeries.slice(third, third * 2),
+            rawSeries.slice(third * 2),
+          ];
+          hrThirds_secs = [
+            rawHR.slice(0, third),
+            rawHR.slice(third, third * 2),
+            rawHR.slice(third * 2),
+          ];
+        }
 
         const avgHR  = arr => { const v = arr.filter(h => h > 0); return v.length ? Math.round(v.reduce((s,h)=>s+h,0)/v.length) : 0; };
         const avgPwr = arr => arr.length ? Math.round(arr.filter(p => p > 0).reduce((s,p) => s + p, 0) / arr.filter(p => p > 0).length) : 0;
@@ -3675,12 +3839,18 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                 const rawSeries = fitData?.movingPowerSeries ?? [];
                 const totalSecs = rawSeries.length;
                 const rideMins = totalSecs / 60;
-                const third = Math.floor(totalSecs / 3);
-                const rawThirds = [
-                  rawSeries.slice(0, third),
-                  rawSeries.slice(third, third * 2),
-                  rawSeries.slice(third * 2),
-                ];
+                // 4C sub-step 6 — route-distance thirds when alignment available.
+                let rawThirds;
+                if (thirdsByRouteDistance) {
+                  rawThirds = thirdsByRouteDistance.map(idxs => idxs.map(i => rawSeries[i]));
+                } else {
+                  const third = Math.floor(totalSecs / 3);
+                  rawThirds = [
+                    rawSeries.slice(0, third),
+                    rawSeries.slice(third, third * 2),
+                    rawSeries.slice(third * 2),
+                  ];
+                }
                 const actualThreshMins = rawThirds.map(t =>
                   Math.round(t.filter(w => w >= threshWatts).length / 60 * 10) / 10
                 );
@@ -3765,22 +3935,36 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               const planPowerStream = selectedPlan.pacingPlan.powerStream;
               if (!planPowerStream || planPowerStream.length === 0) return null;
 
-              // Split actual by moving seconds, planned by powerStream (1-min) block count
-              // Using movingPowerSeries for actuals (1-second) and powerStream for planned (1-min)
-              // — both give accurate NP; 5-min block averaging suppresses variance before NP calc
+              // 4C sub-step 6 — bucket BOTH actual and plan by route-distance
+              // thirds so the IF comparison is apples-to-apples and consistent
+              // with every other "thirds" section. Falls back to legacy
+              // index-thirds when alignment is unavailable.
               const rawSeries = fitData?.movingPowerSeries ?? [];
               const fitN  = rawSeries.length;
               const planN = planPowerStream.length;
-              const actualThirds = [
-                rawSeries.slice(0, Math.floor(fitN / 3)).map(p => ({ power: p })),
-                rawSeries.slice(Math.floor(fitN / 3), Math.floor(2 * fitN / 3)).map(p => ({ power: p })),
-                rawSeries.slice(Math.floor(2 * fitN / 3)).map(p => ({ power: p })),
-              ];
-              const planThirds = [
-                planPowerStream.slice(0, Math.floor(planN / 3)),
-                planPowerStream.slice(Math.floor(planN / 3), Math.floor(2 * planN / 3)),
-                planPowerStream.slice(Math.floor(2 * planN / 3)),
-              ];
+              let actualThirds, planThirds;
+              if (thirdsByRouteDistance && selectedPlan?.route?.totalDistKm) {
+                actualThirds = thirdsByRouteDistance.map(idxs =>
+                  idxs.map(i => ({ power: rawSeries[i] })));
+                const totalKm = selectedPlan.route.totalDistKm;
+                const t1Km = totalKm / 3, t2Km = totalKm * 2 / 3;
+                planThirds = [
+                  planPowerStream.filter(pt => pt.distKm < t1Km),
+                  planPowerStream.filter(pt => pt.distKm >= t1Km && pt.distKm < t2Km),
+                  planPowerStream.filter(pt => pt.distKm >= t2Km),
+                ];
+              } else {
+                actualThirds = [
+                  rawSeries.slice(0, Math.floor(fitN / 3)).map(p => ({ power: p })),
+                  rawSeries.slice(Math.floor(fitN / 3), Math.floor(2 * fitN / 3)).map(p => ({ power: p })),
+                  rawSeries.slice(Math.floor(2 * fitN / 3)).map(p => ({ power: p })),
+                ];
+                planThirds = [
+                  planPowerStream.slice(0, Math.floor(planN / 3)),
+                  planPowerStream.slice(Math.floor(planN / 3), Math.floor(2 * planN / 3)),
+                  planPowerStream.slice(Math.floor(2 * planN / 3)),
+                ];
+              }
 
               // NP IF per third: 30-sec rolling average → 4th-power mean → divide by FTP.
               // Arithmetic mean of power/ftp (avgIF) is materially lower than NP IF on variable
@@ -3898,17 +4082,38 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                 {(() => {
                   const { minWbal, minWbalPct, minWbalTime, peakBurnJ, peakBurnTime, wPrime, chartData } = actualWbalRaw;
 
-                  // Third boundaries in seconds
-                  const totalSecs  = fitData.movingPowerSeries.length;
-                  const t1EndSecs  = Math.floor(totalSecs / 3);
-                  const t2EndSecs  = Math.floor(2 * totalSecs / 3);
-
-                  const peakThird  = peakBurnTime <= t1EndSecs ? "T1 (first third)"
-                    : peakBurnTime <= t2EndSecs ? "T2 (second third)"
-                    : "T3 (final third)";
-                  const minThird   = minWbalTime <= t1EndSecs ? "T1 (first third)"
-                    : minWbalTime <= t2EndSecs ? "T2 (second third)"
-                    : "T3 (final third)";
+                  // 4C sub-step 6 — third labels for peak-burn and min-W'bal
+                  // events. Bucketed by route-distance third when alignment is
+                  // available (so labels match other "thirds" cards on the
+                  // page). Falls back to moving-time index thirds otherwise.
+                  const totalSecs = fitData.movingPowerSeries.length;
+                  const thirdLabelFor = (secIdx) => {
+                    if (thirdsByRouteDistance) {
+                      // Find which route-third this second-index belongs to.
+                      for (let t = 0; t < 3; t++) {
+                        if (thirdsByRouteDistance[t].includes(secIdx)) {
+                          return t === 0 ? "T1 (first third)"
+                               : t === 1 ? "T2 (second third)"
+                               : "T3 (final third)";
+                        }
+                      }
+                      return "(off-route)";
+                    }
+                    const t1EndSecs = Math.floor(totalSecs / 3);
+                    const t2EndSecs = Math.floor(2 * totalSecs / 3);
+                    return secIdx <= t1EndSecs ? "T1 (first third)"
+                         : secIdx <= t2EndSecs ? "T2 (second third)"
+                         : "T3 (final third)";
+                  };
+                  const peakThird = thirdLabelFor(peakBurnTime);
+                  const minThird  = thirdLabelFor(minWbalTime);
+                  // Moving-time third boundaries — used by the W'bal chart's
+                  // vertical reference lines (chart x-axis is moving time, so
+                  // boundaries need to be a single time value). The narrative
+                  // gating below uses `peakThird` instead — route-distance
+                  // aware, consistent with other cards.
+                  const t1EndSecs = Math.floor(totalSecs / 3);
+                  const t2EndSecs = Math.floor(2 * totalSecs / 3);
 
                   const wDrawnPct  = Math.round((wPrime - minWbal) / wPrime * 100);
                   const wDrawnKj   = Math.round((wPrime - minWbal) / 100) / 10;
@@ -3928,7 +4133,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                       text: `Your anaerobic reserve dropped to ${minWbalPct}% (${minKjFmt} kJ) at ${minTimeFmt} — below the 20% danger threshold where forced power reduction typically occurs. The largest single-second burn (${peakKjFmt} kJ/s) happened in ${peakThird}. At this level of depletion your body has little choice but to slow down regardless of motivation. If you experienced a sharp power drop late in the race, this is the physiological explanation.`,
                       color: "#FF3347"
                     };
-                    if (minWbalPct < 40 && peakBurnTime <= t1EndSecs) return {
+                    if (minWbalPct < 40 && peakThird.startsWith("T1")) return {
                       text: `W' dropped to ${minWbalPct}% (${minKjFmt} kJ remaining from ${wPrimeKj} kJ). The largest burn occurred early — in ${peakThird} at ${peakTimeFmt}. Early match-burning is a common pattern in races with aggressive starts or punchy opening climbs. The body can recover W' at sub-threshold effort, but if power stayed elevated those early draws compound into late-race fatigue. Cross-reference with Threshold Exposure above.`,
                       color: "#FFB800"
                     };
@@ -3936,7 +4141,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                       text: `W' dropped to ${minWbalPct}% — a draw of ${wDrawnPct}% of total anaerobic budget. The minimum occurred in ${minThird} at ${minTimeFmt}, with peak burn in ${peakThird}. At this depletion level you were working in borrowed territory. Check whether this timing aligns with a climb or surge in the power chart.`,
                       color: "#FFB800"
                     };
-                    if (peakBurnTime <= t1EndSecs) return {
+                    if (peakThird.startsWith("T1")) return {
                       text: `W' was well managed overall, dropping to ${minWbalPct}% at minimum. The largest burn occurred early in ${peakThird} — likely a race start surge or opening climb — but you recovered effectively. Good match management: spend hard when needed, recover between efforts.`,
                       color: "#00FF8C"
                     };
