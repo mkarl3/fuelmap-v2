@@ -317,15 +317,16 @@ export function buildPowerStream(
 
   // ── Final metrics from per-second stream (canonical) ──────────────────
   // NP via canonical computeNP (CC#1) — 30-sec rolling, 4th-power mean.
-  // avg via duration-weighted moving timeline (zeros excluded — Garmin/Strava
-  // convention; the active-only filter matches the legacy 1-min behavior and
-  // ANALYZE-side avgPower calculation, keeping PLAN/ACTUAL directly
-  // comparable).
+  // avg via Convention C (Decision_Log.md): moving timeline, zeros included.
+  // Same series NP runs on. The variance-penalty inequality avg ≤ NP must
+  // hold; filtering zeros from avg (Convention B / Garmin session) breaks
+  // this and was the B-20 bug — the filter is now removed. ANALYZE-side
+  // `rawAvgPower` (fitParser.js) has always used Convention C; PLAN now
+  // matches. Closes Validation Report Finding F-5 (PLAN-side helper drift).
   const powersPerSec = perSec.map(p => p.power);
   const normalizedPower = computeNP(powersPerSec);
-  const activePowers = powersPerSec.filter(p => p > 0);
-  const avgPower = activePowers.length > 0
-    ? Math.round(activePowers.reduce((a, p) => a + p, 0) / activePowers.length)
+  const avgPower = powersPerSec.length > 0
+    ? Math.round(powersPerSec.reduce((a, p) => a + p, 0) / powersPerSec.length)
     : 0;
   const ifActual = athlete.ftp > 0
     ? Math.round((normalizedPower / athlete.ftp) * 100) / 100

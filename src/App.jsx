@@ -10,6 +10,7 @@ import {
   buildPowerStream, flatIFForTargetNP,
   alignFitToGpx,
   fitWarn,
+  computeNP,
   COGGAN_ZONES, DEFAULTS,
 } from './physics/index.js';
 // (Prompt 3 rewrote detectClimbs to use the new climbCategory(climbStats)
@@ -50,6 +51,34 @@ function buildDefaultClimbCaps(ftp) {
     moderate: { min: 0, max: Math.round(ftp * c.moderatePctFtp) },
     steep:    { min: 0, max: Math.round(ftp * c.steepPctFtp)    },
     wall:     { min: 0, max: Math.round(ftp * c.wallPctFtp)     },
+  };
+}
+
+// Build a complete athleteSnapshot for plan persistence (B-6). Captures every
+// field the plan-time math or analyze-time analysis may need. Backward compat
+// for legacy saves without these fields lives at the consumer site (fall back
+// to currentAthlete profile values when a snapshot field is missing on reload).
+//
+// Notes:
+//  • `wPrime` here is the explicit override if set (post-B-18 Tier 0) or the
+//    derived value at plan-time (Tier 2/3). Either way it's the value the
+//    plan-time W'bal sim used.
+//  • `cpTests` is captured by reference clone so subsequent profile edits
+//    don't mutate the saved race's CP context.
+//  • `cpTestedAt` preserves the timestamp stamp used by Athlete-modal
+//    "tested on …" display.
+function buildAthleteSnapshot(athlete) {
+  return {
+    id:                  athlete?.id ?? null,
+    name:                athlete?.name ?? '',
+    ftp:                 athlete?.ftp ?? 0,
+    weight:              athlete?.weight ?? 0,
+    wPrime:              _physicsUnwrap(deriveWPrime(athlete), DEFAULTS.wPrimeFallbackJ),
+    phenotype:           athlete?.phenotype ?? 'allrounder',
+    maxHR:               athlete?.maxHR ?? null,
+    cpTests:             Array.isArray(athlete?.cpTests) ? athlete.cpTests.map(t => ({ ...t })) : [],
+    cpTestedAt:          athlete?.cpTestedAt ?? null,
+    maxCarbIntakeGPerHr: athlete?.maxCarbIntakeGPerHr ?? 90,
   };
 }
 
@@ -143,19 +172,8 @@ const DEFAULT_BIKE = {
   tireId: "road_28_32",
 };
 
-// Derive physics params from a bike profile object
-// TODO(cleanup): `ifForTargetDuration` below is dead code (no callers found
-// in App.jsx — searched at Prompt 3 investigation). Not in spec; consider
-// removing in a future cleanup prompt. The wind args were silently dropped
-// when estimateDuration's signature was tightened in Prompt 3.
-function ifForTargetDuration(gpxStats, athlete, targetDurationMin, Crr = 0.004, CdA = 0.32, eta = 0.975, bikeWeight = 0, rho = 1.225) {
-  let lo = 0.30, hi = 1.15;
-  for (let i = 0; i < 60; i++) {
-    const mid = (lo + hi) / 2;
-    _physicsUnwrap(estimateDuration(gpxStats, athlete, mid, Crr, CdA, eta, bikeWeight, rho), 9999) > targetDurationMin ? lo = mid : hi = mid;
-  }
-  return Math.round((lo + hi) / 2 * 100) / 100;
-}
+// (B-7: `ifForTargetDuration` retired. Function had no callers in App.jsx and
+// was not part of the spec; flagged for removal in Prompt 3. Now deleted.)
 
 // ─── CLIMB DETECTION ─────────────────────────────────────────────────────────
 // Scans 1-min block grade stream, groups consecutive ≥3% blocks into climbs.
@@ -1817,16 +1835,9 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       name: planName,
       updatedAt: new Date().toISOString(),
       status: 'planned',
-      // TODO: this snapshot is incomplete vs the full athlete model.
-      // Missing: maxHR, cpTests, cpTestedAt. They were dropped from the
-      // snapshot before this prompt; not adding them here keeps Prompt 2
-      // scope tight, but a future prompt should reconcile so loaded race
-      // plans regenerate identical numbers to plan-time.
-      athleteSnapshot: {
-        id: athlete.id, name: athlete.name, ftp: athlete.ftp,
-        weight: athlete.weight, wPrime: _physicsUnwrap(deriveWPrime(athlete), DEFAULTS.wPrimeFallbackJ), phenotype: athlete.phenotype,
-        maxCarbIntakeGPerHr: athlete.maxCarbIntakeGPerHr ?? 90,
-      },
+      // B-6: complete snapshot of athlete state at plan time. Centralized via
+      // buildAthleteSnapshot — all fields plan/analyze math may consume.
+      athleteSnapshot: buildAthleteSnapshot(athlete),
       bikeSnapshot: {
         id: activeBike.id, name: activeBike.name, weight: activeBike.weight,
         positionId: activeBike.positionId, drivetrainId: activeBike.drivetrainId, tireId: activeBike.tireId,
@@ -1907,12 +1918,8 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   };
 
   const updateAthleteProfile = async () => {
-    // (See snapshot TODO in saveOrUpdateRace — same incomplete shape applies here.)
-    const snap = {
-      id: currentAthlete.id, name: currentAthlete.name, ftp: currentAthlete.ftp,
-      weight: currentAthlete.weight, wPrime: _physicsUnwrap(deriveWPrime(currentAthlete), DEFAULTS.wPrimeFallbackJ), phenotype: currentAthlete.phenotype,
-      maxCarbIntakeGPerHr: currentAthlete.maxCarbIntakeGPerHr ?? 90,
-    };
+    // B-6: complete athleteSnapshot via shared buildAthleteSnapshot helper.
+    const snap = buildAthleteSnapshot(currentAthlete);
     setSnapshotAthlete(snap);
     if (activeRaceId) {
       try {
@@ -3525,17 +3532,24 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
 
             {/* Fade Analysis — only shown when a plan is selected */}
             {selectedPlan && (() => {
-              // blockMins: minutes per block in the stream (1-min on both sides post-4C sub-step 1).
-              // Rolling window = 30 seconds worth of blocks, minimum 1
-              const npOfStream = (stream, blockMins) => {
-                if (!stream || stream.length === 0) return 0;
-                const window = Math.max(1, Math.ceil(0.5 / blockMins)); // 0.5 min = 30 sec
-                const powers = stream.map(b => b.power);
-                const rolling = powers.map((_, i, a) => {
-                  const w = a.slice(Math.max(0, i - window + 1), i + 1);
-                  return w.reduce((s, p) => s + p, 0) / w.length;
-                });
-                return Math.round(Math.pow(rolling.reduce((s, p) => s + p ** 4, 0) / rolling.length, 0.25));
+              // B-21: per-third NP via canonical computeNP on per-second data on
+              // BOTH sides. Pre-fix, ACTUAL ran 30-sec rolling window over 1-sec
+              // data (correct) while PLAN ran window=1 over 1-min blocks (no
+              // rolling at all). The drift was 1–3W per third on PLAN side vs
+              // canonical math (per Validation Report Finding F-6). Now both
+              // sides route through `computeNP` and produce coherent numbers.
+              //
+              // Legacy saves without `powerStreamPerSec` (pre-4B / CC#7) fall
+              // back to the 1-min `powerStream` block-NP approximation. The
+              // approximation is what the saved race shipped with; respecting
+              // the no-retroactive-recompute principle.
+              const blockNPApprox = (blocks) => {
+                if (!blocks || blocks.length === 0) return 0;
+                const powers = blocks.map(b => b.power);
+                // 4th-power mean of 1-min averages. No rolling window at this
+                // resolution. Used only on legacy saves.
+                return Math.round(Math.pow(
+                  powers.reduce((s, p) => s + p ** 4, 0) / powers.length, 0.25));
               };
 
               // 4C sub-step 6 — bucket BOTH actual and plan by route-distance
@@ -3543,7 +3557,15 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               // (and consistent with every other "thirds" section on the page).
               // Falls back to legacy moving-time index thirds when alignment is
               // unavailable (legacy save with no _gpxPts/movingGPSPath).
-              const splitTimeThirds = (stream) => {
+              const splitPerSecByDistKm = (perSec, t1Km, t2Km) => {
+                if (!perSec?.length) return [[], [], []];
+                return [
+                  perSec.filter(p => p.distKm < t1Km).map(p => p.power),
+                  perSec.filter(p => p.distKm >= t1Km && p.distKm < t2Km).map(p => p.power),
+                  perSec.filter(p => p.distKm >= t2Km).map(p => p.power),
+                ];
+              };
+              const splitTimeThirdsLegacy = (stream) => {
                 if (!stream || stream.length === 0) return [[], [], []];
                 const maxTime = stream[stream.length - 1].time;
                 const t1 = maxTime / 3, t2 = maxTime * 2 / 3;
@@ -3553,26 +3575,44 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                   stream.filter(pt => pt.time >= t2),
                 ];
               };
-              const splitPlanByRouteThirds = (planStream) => {
-                if (!planStream?.length || !selectedPlan?.route?.totalDistKm) return splitTimeThirds(planStream);
-                const totalKm = selectedPlan.route.totalDistKm;
-                const t1Km = totalKm / 3, t2Km = totalKm * 2 / 3;
-                return [
-                  planStream.filter(pt => pt.distKm < t1Km),
-                  planStream.filter(pt => pt.distKm >= t1Km && pt.distKm < t2Km),
-                  planStream.filter(pt => pt.distKm >= t2Km),
-                ];
-              };
 
+              // ACTUAL side: per-second movingPowerSeries bucketed via
+              // thirdsByRouteDistance (route-distance bins, off-route excluded).
+              // Falls back to elapsed-time thirds when alignment unavailable.
               const rps = fitData.movingPowerSeries;
-              const actualThirds = thirdsByRouteDistance
-                ? thirdsByRouteDistance.map(idxs => idxs.map(i => ({ power: rps[i] })))
-                : splitTimeThirds(rps.map((p, i) => ({ power: p, time: i / 60 })));
-              const plannedThirds = thirdsByRouteDistance
-                ? splitPlanByRouteThirds(selectedPlan.pacingPlan.powerStream)
-                : splitTimeThirds(selectedPlan.pacingPlan.powerStream);
-              const actualNPs  = actualThirds.map(t => npOfStream(t, 1/60));  // movingPowerSeries = 1-second (1/60 min)
-              const plannedNPs = plannedThirds.map(t => npOfStream(t, 1));    // powerStream = 1-min blocks
+              const actualThirdPowers = thirdsByRouteDistance
+                ? thirdsByRouteDistance.map(idxs => idxs.map(i => rps[i]))
+                : (() => {
+                    const stream = rps.map((p, i) => ({ power: p, time: i / 60 }));
+                    return splitTimeThirdsLegacy(stream).map(third => third.map(b => b.power));
+                  })();
+              const actualNPs = actualThirdPowers.map(powers => computeNP(powers));
+
+              // PLAN side: prefer per-second `powerStreamPerSec` (CC#7 canonical
+              // path). Legacy saves without it fall back to 1-min powerStream
+              // block-NP approximation per the no-retroactive-recompute rule.
+              const planPerSec = selectedPlan.pacingPlan.powerStreamPerSec;
+              const totalKm = selectedPlan?.route?.totalDistKm ?? 0;
+              let plannedNPs;
+              if (planPerSec?.length && totalKm > 0) {
+                const t1Km = totalKm / 3, t2Km = totalKm * 2 / 3;
+                const planThirdPowers = splitPerSecByDistKm(planPerSec, t1Km, t2Km);
+                plannedNPs = planThirdPowers.map(powers => computeNP(powers));
+              } else {
+                // Legacy fallback: 1-min powerStream block-NP approximation.
+                const legacyStream = selectedPlan.pacingPlan.powerStream;
+                const plannedThirds = totalKm > 0
+                  ? (() => {
+                      const t1Km = totalKm / 3, t2Km = totalKm * 2 / 3;
+                      return [
+                        legacyStream.filter(pt => pt.distKm < t1Km),
+                        legacyStream.filter(pt => pt.distKm >= t1Km && pt.distKm < t2Km),
+                        legacyStream.filter(pt => pt.distKm >= t2Km),
+                      ];
+                    })()
+                  : splitTimeThirdsLegacy(legacyStream);
+                plannedNPs = plannedThirds.map(third => blockNPApprox(third));
+              }
 
               // Color per third: within ±10% = blue (on plan), over >10% = red (too hard), under >10% = green (too easy)
               const thirdColor = (actual, planned) => {
@@ -3935,54 +3975,68 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               const planPowerStream = selectedPlan.pacingPlan.powerStream;
               if (!planPowerStream || planPowerStream.length === 0) return null;
 
-              // 4C sub-step 6 — bucket BOTH actual and plan by route-distance
-              // thirds so the IF comparison is apples-to-apples and consistent
-              // with every other "thirds" section. Falls back to legacy
-              // index-thirds when alignment is unavailable.
-              const rawSeries = fitData?.movingPowerSeries ?? [];
-              const fitN  = rawSeries.length;
-              const planN = planPowerStream.length;
-              let actualThirds, planThirds;
-              if (thirdsByRouteDistance && selectedPlan?.route?.totalDistKm) {
-                actualThirds = thirdsByRouteDistance.map(idxs =>
-                  idxs.map(i => ({ power: rawSeries[i] })));
-                const totalKm = selectedPlan.route.totalDistKm;
-                const t1Km = totalKm / 3, t2Km = totalKm * 2 / 3;
-                planThirds = [
-                  planPowerStream.filter(pt => pt.distKm < t1Km),
-                  planPowerStream.filter(pt => pt.distKm >= t1Km && pt.distKm < t2Km),
-                  planPowerStream.filter(pt => pt.distKm >= t2Km),
-                ];
-              } else {
-                actualThirds = [
-                  rawSeries.slice(0, Math.floor(fitN / 3)).map(p => ({ power: p })),
-                  rawSeries.slice(Math.floor(fitN / 3), Math.floor(2 * fitN / 3)).map(p => ({ power: p })),
-                  rawSeries.slice(Math.floor(2 * fitN / 3)).map(p => ({ power: p })),
-                ];
-                planThirds = [
-                  planPowerStream.slice(0, Math.floor(planN / 3)),
-                  planPowerStream.slice(Math.floor(planN / 3), Math.floor(2 * planN / 3)),
-                  planPowerStream.slice(Math.floor(2 * planN / 3)),
-                ];
-              }
-
-              // NP IF per third: 30-sec rolling average → 4th-power mean → divide by FTP.
-              // Arithmetic mean of power/ftp (avgIF) is materially lower than NP IF on variable
-              // terrain — at IF 0.76 NP, avg power IF would be ~0.61. Must use NP methodology.
-              const npIF = (stream, blockSecs) => {
-                if (!stream || stream.length === 0) return 0;
-                const powers = stream.map(b => b.power);
-                const windowBlocks = Math.max(1, Math.ceil(30 / blockSecs));
-                const rolling = powers.map((_, i) => {
-                  const w = powers.slice(Math.max(0, i - windowBlocks + 1), i + 1);
-                  return w.reduce((s, p) => s + p, 0) / w.length;
-                });
-                const np = Math.pow(rolling.reduce((s, p) => s + Math.pow(p, 4), 0) / rolling.length, 0.25);
-                return Math.round(np / athlete.ftp * 100) / 100;
+              // B-21: Per-third NP via canonical computeNP on per-second data on
+              // BOTH sides. Pre-fix, the local `npIF` helper ran a 30-sec rolling
+              // window only on 1-sec data; on 1-min blocks the window degenerated
+              // to 1 (no rolling) — drift 1–3W per third on PLAN. Now both sides
+              // route through canonical `computeNP`.
+              //
+              // Legacy saves without `powerStreamPerSec` fall back to 1-min
+              // block-NP approximation (no-retroactive-recompute principle).
+              const blockNPApprox = (blocks) => {
+                if (!blocks || blocks.length === 0) return 0;
+                const powers = blocks.map(b => b.power);
+                return Math.pow(
+                  powers.reduce((s, p) => s + p ** 4, 0) / powers.length, 0.25);
               };
 
-              const actualIFs  = actualThirds.map(t => npIF(t, 1));    // movingPowerSeries = 1-second
-              const plannedIFs = planThirds.map(t => npIF(t, 60));     // powerStream = 1-min blocks
+              // ACTUAL side: per-second movingPowerSeries bucketed via
+              // thirdsByRouteDistance. Falls back to elapsed-time index thirds
+              // when alignment unavailable.
+              const rawSeries = fitData?.movingPowerSeries ?? [];
+              const fitN = rawSeries.length;
+              const actualThirdPowers = (thirdsByRouteDistance && selectedPlan?.route?.totalDistKm)
+                ? thirdsByRouteDistance.map(idxs => idxs.map(i => rawSeries[i]))
+                : [
+                    rawSeries.slice(0, Math.floor(fitN / 3)),
+                    rawSeries.slice(Math.floor(fitN / 3), Math.floor(2 * fitN / 3)),
+                    rawSeries.slice(Math.floor(2 * fitN / 3)),
+                  ];
+              const actualNPs = actualThirdPowers.map(powers => computeNP(powers));
+              const actualIFs = actualNPs.map(np => Math.round(np / athlete.ftp * 100) / 100);
+
+              // PLAN side: prefer per-second `powerStreamPerSec`. Legacy saves
+              // without it use 1-min block-NP approximation.
+              const planPerSec = selectedPlan.pacingPlan.powerStreamPerSec;
+              const totalKm = selectedPlan?.route?.totalDistKm ?? 0;
+              let plannedNPs;
+              if (planPerSec?.length && totalKm > 0) {
+                const t1Km = totalKm / 3, t2Km = totalKm * 2 / 3;
+                plannedNPs = [
+                  computeNP(planPerSec.filter(p => p.distKm < t1Km).map(p => p.power)),
+                  computeNP(planPerSec.filter(p => p.distKm >= t1Km && p.distKm < t2Km).map(p => p.power)),
+                  computeNP(planPerSec.filter(p => p.distKm >= t2Km).map(p => p.power)),
+                ];
+              } else {
+                // Legacy fallback: 1-min block-NP on powerStream.
+                const planN = planPowerStream.length;
+                const planThirds = totalKm > 0
+                  ? (() => {
+                      const t1Km = totalKm / 3, t2Km = totalKm * 2 / 3;
+                      return [
+                        planPowerStream.filter(pt => pt.distKm < t1Km),
+                        planPowerStream.filter(pt => pt.distKm >= t1Km && pt.distKm < t2Km),
+                        planPowerStream.filter(pt => pt.distKm >= t2Km),
+                      ];
+                    })()
+                  : [
+                      planPowerStream.slice(0, Math.floor(planN / 3)),
+                      planPowerStream.slice(Math.floor(planN / 3), Math.floor(2 * planN / 3)),
+                      planPowerStream.slice(Math.floor(2 * planN / 3)),
+                    ];
+                plannedNPs = planThirds.map(third => Math.round(blockNPApprox(third)));
+              }
+              const plannedIFs = plannedNPs.map(np => Math.round(np / athlete.ftp * 100) / 100);
               const deltas = actualIFs.map((a, i) => plannedIFs[i] > 0 ? Math.round((a - plannedIFs[i]) / plannedIFs[i] * 100) : 0);
 
               const barColor = (delta) => {

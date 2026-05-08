@@ -110,29 +110,33 @@ export function buildPerClimbStats(climbs, movingPowerSeries, movingDistSeries,
     // Collect power seconds within this climb's distance window. Off-route
     // seconds (gpxDistAtSec[i] === NaN) are excluded — NaN comparisons are
     // false on both sides of the window, so they fall through naturally.
-    const powersForNP = [];
-    const powersForAvg = [];
+    //
+    // B-20: avg and NP both consume the same series (zeros included =
+    // Convention C). Pre-fix, `powersForAvg` filtered `p > 0` while
+    // `powersForNP` did not — produced avg > NP scenarios on FIT data with
+    // coasting (observed on PP climb 1: act avg 379 > act NP 271). The
+    // variance-penalty inequality avg ≤ NP must hold per Decision_Log.md.
+    const powersInClimb = [];
     let lastSecInClimb = -1;
     for (let i = 0; i < n; i++) {
       const d = gpxDistAtSec[i];
       if (d >= startM && d <= endM) {
-        const p = movingPowerSeries[i];
-        powersForNP.push(p);
-        if (p > 0) powersForAvg.push(p);
+        powersInClimb.push(movingPowerSeries[i]);
         lastSecInClimb = i;
       }
     }
 
-    const secondsInClimb = powersForAvg.length;
-    if (powersForNP.length === 0) {
+    const secondsInClimb = powersInClimb.length;
+    if (secondsInClimb === 0) {
       fitWarn('climb_no_fit_data',
         `Climb #${climb.id} at ${climb.startDistKm}km has no FIT data`,
         { climbId: climb.id });
       return null;
     }
 
-    const np     = computeNP(powersForNP);
-    const avgP   = secondsInClimb ? Math.round(powersForAvg.reduce((s, p) => s + p, 0) / secondsInClimb) : 0;
+    const np     = computeNP(powersInClimb);
+    // avg must be ≤ NP per Convention C (Decision_Log.md).
+    const avgP   = Math.round(powersInClimb.reduce((s, p) => s + p, 0) / secondsInClimb);
     const pctFTP = ftp > 0 && np > 0 ? Math.round(np / ftp * 100) : 0;
     const wbalPctAtExit = lastSecInClimb >= 0 ? wbalAtSec(lastSecInClimb) : null;
 

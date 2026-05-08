@@ -1,6 +1,11 @@
 // Compute athlete's W' (joules) using best available data source.
 //
-// Three-tier fallback:
+// Four-tier fallback:
+//   Tier 0: explicit `athlete.wPrime` override (when set and > 0). Closes B-18
+//           (Validation Report Finding A) — pre-fix, the Athlete-modal "override
+//           W' (kJ)" input wrote `saved.wPrime` but no consumer read it; the
+//           override was silently discarded for any computation. Tier 0 makes
+//           the override path live.
 //   Tier 1: CP test fitting via `fitCPModel` (≥ 2 valid efforts)
 //   Tier 2: Phenotype lookup (`ftp × phenotype.wMult`)
 //   Tier 3: FTP-based default (`ftp × DEFAULTS.wPrimePerWattFtp`)
@@ -14,6 +19,13 @@
 //  • Magic 75 → DEFAULTS.wPrimePerWattFtp (CC#5)
 //  • Final 20,000 J fallback → structured error (CC#6)
 //  • 3-parameter CP model deferred to future (see spec 3.2 reasoning)
+//
+// Data-integrity note (CC#3): Tier 0 only reaches the W'bal math via the "no
+// CP test data" path in `buildWbal` / `buildWbalFromRawSeries`. When CP test
+// data exists, the dispatch uses fitCPModel for both CP and W' and never
+// consults `deriveWPrime` — preserving the "CP and W' from the same source"
+// rule. Override + CP-test-present is therefore a no-op (override silently
+// ignored when CP tests exist), matching pre-fix behaviour for that case.
 
 import { fitCPModel }   from './fitCPModel.js';
 import { fitWarn }      from './fitWarn.js';
@@ -41,6 +53,16 @@ import { DEFAULTS }     from '../constants/defaults.js';
  * Flagged for future if user demand surfaces.
  */
 export function deriveWPrime(athlete) {
+  // ── Tier 0: explicit athlete.wPrime override (B-18) ─────────────────
+  // When set and > 0, return as-is. No scaling, no floor, no fallback
+  // override. This is the path the Athlete-modal override input feeds.
+  // Reachable only when the upstream W'bal dispatch falls through to
+  // `deriveWPrime` — i.e. no CP test data is present (per CC#3 data
+  // integrity).
+  if (athlete && typeof athlete.wPrime === 'number' && athlete.wPrime > 0) {
+    return Math.round(athlete.wPrime);
+  }
+
   // ── Tier 1: CP test fitting ─────────────────────────────────────────
   if (athlete && Array.isArray(athlete.cpTests)) {
     const points = athlete.cpTests
@@ -75,6 +97,17 @@ export function deriveWPrime(athlete) {
 }
 
 // ─── Sanity checks ───────────────────────────────────────────────────────
+//
+// Tier 0 (explicit override — B-18):
+//   deriveWPrime({ wPrime: 22000, ftp: 200, phenotype: 'allrounder' })
+//   → 22000  (override wins; phenotype/FTP path skipped)
+//
+//   deriveWPrime({ wPrime: 0, ftp: 200, phenotype: 'allrounder' })
+//   → 15000  (override === 0 is treated as "not set"; falls to Tier 2)
+//
+//   deriveWPrime({ wPrime: 22000, cpTests: [{secs:180,watts:300},{secs:720,watts:250}], ftp: 250 })
+//   → 22000  (Tier 0 wins INSIDE deriveWPrime — but in practice never reached
+//             when CP tests exist, because buildWbal dispatches around it)
 //
 // Tier 1 (CP test fitting):
 //   deriveWPrime({ cpTests: [{secs:180, watts:300}, {secs:720, watts:250}], ftp: 250 })

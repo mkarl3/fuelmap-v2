@@ -1,0 +1,283 @@
+[
+  {
+    "raceId": "TDL MK_25",
+    "climbCount": 8,
+    "alignmentMs": 5529,
+    "onRouteFrac": 1,
+    "rows": [
+      {
+        "climbId": 1,
+        "startDistKm": 1.9,
+        "lengthKm": 1.9,
+        "avgGrade": 4.1,
+        "peakGradePct": 6.8,
+        "category": "moderate",
+        "pred": {
+          "np": 237,
+          "avgP": 237,
+          "pctFTP": 110,
+          "secs": 343
+        },
+        "act": {
+          "np": 241,
+          "avgP": 236,
+          "pctFTP": 112,
+          "secs": 374,
+          "wbalPctAtExit": 37
+        },
+        "delta": {
+          "np": 4,
+          "avgP": -1,
+          "pctFTP": 2
+        }
+      },
+      {
+        "climbId": 2,
+        "startDistKm": 16.6,
+        "lengthKm": 0.5,
+        "avgGrade": 3.6,
+        "peakGradePct": 3.6,
+        "category": "moderate",
+        "pred": {
+          "np": 231,
+          "avgP": 231,
+          "pctFTP": 107,
+          "secs": 83
+        },
+        "act": {
+          "np": 273,
+          "avgP": 268,
+          "pctFTP": 127,
+          "secs": 88,
+          "wbalPctAtExit": 36
+        },
+        "delta": {
+          "np": 42,
+          "avgP": 37,
+          "pctFTP": 20
+        }
+      },
+      {
+        "climbId": 3,
+        "startDistKm": 21.4,
+        "lengthKm": 0.5,
+        "avgGrade": 4.2,
+        "peakGradePct": 4.2,
+        "category": "moderate",
+        "pred": {
+          "np": 231,
+          "avgP": 231,
+          "pctFTP": 107,
+          "secs": 89
+        },
+        "act": {
+          "np": 233,
+          "avgP": 237,
+          "pctFTP": 108,
+          "secs": 95,
+          "wbalPctAtExit": 49
+        },
+        "delta": {
+          "np": 2,
+          "avgP": 6,
+          "pctFTP": 1
+        }
+      },
+      {
+        "climbId": 4,
+        "startDistKm": 31.7,
+        "lengthKm": 0.5,
+        "avgGrade": 3.9,
+        "peakGradePct": 3.9,
+        "category": "moderate",
+        "pred": {
+          "np": 231,
+          "avgP": 231,
+          "pctFTP": 107,
+          "secs": 84
+        },
+        "act": {
+          "np": 240,
+          "avgP": 240,
+          "pctFTP": 112,
+          "secs": 97,
+          "wbalPctAtExit": 57
+        },
+        "delta": {
+          "np": 9,
+          "avgP": 9,
+          "pctFTP": 5
+        }
+      },
+      {
+        "climbId": 5,
+        "startDistKm": 38.5,
+        "lengthKm": 0.5,
+        "avgGrade": 4.2,
+        "peakGradePct": 4.2,
+        "category": "moderate",
+        "pred": {
+          "np": 231,
+          "avgP": 231,
+          "pctFTP": 107,
+          "secs": 92
+        },
+        "act": {
+          "np": 241,
+          "avgP": 239,
+          "pctFTP": 112,
+          "secs": 91,
+          "wbalPctAtExit": 68
+        },
+        "delta": {
+          "np": 10,
+          "avgP": 8,
+          "pctFTP": 5
+        }
+      },
+      {
+        "climbId": 6,
+        "startDistKm": 40.5,
+        "lengthKm": 0.5,
+        "avgGrade": 3,
+        "peakGradePct": 3,
+        "category": "moderate",
+        "pred": {
+          "np": 228,
+          "avgP": 211,
+          "pctFTP": 106,
+          "secs": 72
+        },
+        "act": {
+          "np": 218,
+          "avgP": 200,
+          "pctFTP": 101,
+          "secs": 81,
+          "wbalPctAtExit": 74
+        },
+        "delta": {
+          "np": -10,
+          "avgP": -11,
+          "pctFTP": -5
+        }
+      },
+      {
+        "climbId": 7,
+        "startDistKm": 43.9,
+        "lengthKm": 0.5,
+        "avgGrade": 4.8,
+        "peakGradePct": 4.8,
+        "category": "moderate",
+        "pred": {
+          "np": 231,
+          "avgP": 231,
+          "pctFTP": 107,
+          "secs": 97
+        },
+        "act": {
+          "np": 224,
+          "avgP": 225,
+          "pctFTP": 104,
+          "secs": 115,
+          "wbalPctAtExit": 68
+        },
+        "delta": {
+          "np": -7,
+          "avgP": -6,
+          "pctFTP": -3
+        }
+      },
+      {
+        "climbId": 8,
+        "startDistKm": 48.7,
+        "lengthKm": 0.5,
+        "avgGrade": 4.5,
+        "peakGradePct": 4.5,
+        "category": "moderate",
+        "pred": {
+          "np": 231,
+          "avgP": 231,
+          "pctFTP": 107,
+          "secs": 93
+        },
+        "act": {
+          "np": 231,
+          "avgP": 232,
+          "pctFTP": 107,
+          "secs": 90,
+          "wbalPctAtExit": 61
+        },
+        "delta": {
+          "np": 0,
+          "avgP": 1,
+          "pctFTP": 0
+        }
+      }
+    ]
+  },
+  {
+    "raceId": "CCRIDE_MK_26",
+    "climbs": [],
+    "note": "No climbs detected (route too flat)"
+  },
+  {
+    "raceId": "PPRIDE_MK_26",
+    "climbCount": 2,
+    "alignmentMs": 2163,
+    "onRouteFrac": 0.9915481620606386,
+    "rows": [
+      {
+        "climbId": 1,
+        "startDistKm": 23.4,
+        "lengthKm": 0.3,
+        "avgGrade": 5.1,
+        "peakGradePct": 5.1,
+        "category": "moderate",
+        "pred": {
+          "np": 210,
+          "avgP": 210,
+          "pctFTP": 105,
+          "secs": 70
+        },
+        "act": {
+          "np": 271,
+          "avgP": 253,
+          "pctFTP": 136,
+          "secs": 60,
+          "wbalPctAtExit": 10
+        },
+        "delta": {
+          "np": 61,
+          "avgP": 43,
+          "pctFTP": 31
+        }
+      },
+      {
+        "climbId": 2,
+        "startDistKm": 40.6,
+        "lengthKm": 0.3,
+        "avgGrade": 6.1,
+        "peakGradePct": 6.1,
+        "category": "steep",
+        "pred": {
+          "np": 228,
+          "avgP": 225,
+          "pctFTP": 114,
+          "secs": 72
+        },
+        "act": {
+          "np": 306,
+          "avgP": 294,
+          "pctFTP": 153,
+          "secs": 67,
+          "wbalPctAtExit": 8
+        },
+        "delta": {
+          "np": 78,
+          "avgP": 69,
+          "pctFTP": 39
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,236 @@
+[
+  {
+    "raceId": "TDL MK_25",
+    "inputs": {
+      "athlete": {
+        "id": "MK_00",
+        "ftp": 215,
+        "weightKg": 77.11064,
+        "wPrime": 21700
+      },
+      "bike": {
+        "id": "Emonda_21",
+        "weightKg": 7.711064,
+        "CdA": 0.28,
+        "eta": 0.984,
+        "tireMult": 1
+      },
+      "tempC": 25,
+      "rho": 1.1839132986751637,
+      "windSpeedMs": 4.4704,
+      "effWindMs": 1.1176,
+      "windDirDeg": 270,
+      "Crr": 0.004225,
+      "climbCategories": {
+        "moderate": {
+          "min": 0,
+          "max": 231
+        },
+        "steep": {
+          "min": 0,
+          "max": 253
+        },
+        "wall": {
+          "min": 0,
+          "max": 286
+        }
+      },
+      "gpx": {
+        "totalDistKm": 97.5,
+        "elevGainM": 685,
+        "elevLossM": 682,
+        "avgCourseBearing": 169
+      }
+    },
+    "search": {
+      "flatIF": 0.784
+    },
+    "repro": {
+      "durationMin": 181,
+      "avgSpeedKph": 32.4,
+      "avgPower": 166,
+      "avgPowerConvC": 166,
+      "np": 186,
+      "ifActual": 0.87,
+      "tss": 228,
+      "wbalMinJ": 11930,
+      "wbalMinPctOfWPrime": 55,
+      "vi": {
+        "viGrade": 1.035,
+        "viTerrain": 0,
+        "viTotal": 1.035,
+        "correctedDurationMin": 187,
+        "durationLoMin": 178,
+        "durationHiMin": 197
+      }
+    },
+    "appOutput": {
+      "durationMin": 187,
+      "ifActual": 0.86,
+      "np": 185,
+      "avgPower": 167
+    },
+    "deltas": {
+      "durationMin": -6,
+      "np": 1,
+      "ifActual": 0.01,
+      "avgPower": -1
+    }
+  },
+  {
+    "raceId": "CCRIDE_MK_26",
+    "inputs": {
+      "athlete": {
+        "id": "MK_01",
+        "ftp": 200,
+        "weightKg": 77.11064,
+        "wPrime": 15000
+      },
+      "bike": {
+        "id": "Emonda_21",
+        "weightKg": 7.711064,
+        "CdA": 0.28,
+        "eta": 0.984,
+        "tireMult": 1
+      },
+      "tempC": 7.222222222222222,
+      "rho": 1.2589826024927182,
+      "windSpeedMs": 6.25856,
+      "effWindMs": 0.938784,
+      "windDirDeg": 270,
+      "Crr": 0.004,
+      "climbCategories": {
+        "moderate": {
+          "min": 0,
+          "max": 210
+        },
+        "steep": {
+          "min": 0,
+          "max": 230
+        },
+        "wall": {
+          "min": 0,
+          "max": 260
+        }
+      },
+      "gpx": {
+        "totalDistKm": 65.7,
+        "elevGainM": 233,
+        "elevLossM": 232,
+        "avgCourseBearing": 193
+      }
+    },
+    "search": {
+      "flatIF": 0.717
+    },
+    "repro": {
+      "durationMin": 128,
+      "avgSpeedKph": 30.9,
+      "avgPower": 143,
+      "avgPowerConvC": 143,
+      "np": 152,
+      "ifActual": 0.76,
+      "tss": 123,
+      "wbalMinJ": 13777,
+      "wbalMinPctOfWPrime": 91.8,
+      "vi": {
+        "viGrade": 1.028,
+        "viTerrain": 0,
+        "viTotal": 1.028,
+        "correctedDurationMin": 132,
+        "durationLoMin": 125,
+        "durationHiMin": 138
+      }
+    },
+    "appOutput": {
+      "durationMin": 132,
+      "ifActual": 0.76,
+      "np": 152,
+      "avgPower": 142
+    },
+    "deltas": {
+      "durationMin": -4,
+      "np": 0,
+      "ifActual": 0,
+      "avgPower": 1
+    }
+  },
+  {
+    "raceId": "PPRIDE_MK_26",
+    "inputs": {
+      "athlete": {
+        "id": "MK_01",
+        "ftp": 200,
+        "weightKg": 77.11064,
+        "wPrime": 15000
+      },
+      "bike": {
+        "id": "Aspero_21",
+        "weightKg": 9.979023999999999,
+        "CdA": 0.38,
+        "eta": 0.978,
+        "tireMult": 1.28
+      },
+      "tempC": 17.77777777777778,
+      "rho": 1.2133037027135412,
+      "windSpeedMs": 8.9408,
+      "effWindMs": 0.89408,
+      "windDirDeg": 270,
+      "Crr": 0.008,
+      "climbCategories": {
+        "moderate": {
+          "min": 0,
+          "max": 210
+        },
+        "steep": {
+          "min": 0,
+          "max": 230
+        },
+        "wall": {
+          "min": 0,
+          "max": 260
+        }
+      },
+      "gpx": {
+        "totalDistKm": 52.7,
+        "elevGainM": 331,
+        "elevLossM": 330,
+        "avgCourseBearing": 177
+      }
+    },
+    "search": {
+      "flatIF": 0.829
+    },
+    "repro": {
+      "durationMin": 116,
+      "avgSpeedKph": 27.3,
+      "avgPower": 158,
+      "avgPowerConvC": 158,
+      "np": 171,
+      "ifActual": 0.86,
+      "tss": 143,
+      "wbalMinJ": 11119,
+      "wbalMinPctOfWPrime": 74.1,
+      "vi": {
+        "viGrade": 1.033,
+        "viTerrain": 0,
+        "viTotal": 1.034,
+        "correctedDurationMin": 120,
+        "durationLoMin": 114,
+        "durationHiMin": 126
+      }
+    },
+    "appOutput": {
+      "durationMin": 122,
+      "ifActual": 0.85,
+      "np": 170,
+      "avgPower": 158
+    },
+    "deltas": {
+      "durationMin": -6,
+      "np": 1,
+      "ifActual": 0.01,
+      "avgPower": 0
+    }
+  }
+]

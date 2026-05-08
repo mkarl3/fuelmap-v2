@@ -1,0 +1,221 @@
+[
+  {
+    "raceId": "TDL MK_25",
+    "totalRouteKm": 97.5,
+    "onRouteFrac": 1,
+    "thirds": [
+      {
+        "idx": 1,
+        "secs": 3942,
+        "plan": {
+          "np": 187,
+          "if": 0.87,
+          "avg": 167,
+          "canonicalNP": 189
+        },
+        "actual": {
+          "np": 201,
+          "if": 0.93,
+          "avg": 178,
+          "canonicalNP": 201
+        },
+        "delta": {
+          "np": 14,
+          "if": 0.06,
+          "avg": 11,
+          "npPct": 7.5
+        }
+      },
+      {
+        "idx": 2,
+        "secs": 3752,
+        "plan": {
+          "np": 180,
+          "if": 0.84,
+          "avg": 165,
+          "canonicalNP": 182
+        },
+        "actual": {
+          "np": 178,
+          "if": 0.83,
+          "avg": 157,
+          "canonicalNP": 178
+        },
+        "delta": {
+          "np": -2,
+          "if": -0.01,
+          "avg": -8,
+          "npPct": -1.1
+        }
+      },
+      {
+        "idx": 3,
+        "secs": 3858,
+        "plan": {
+          "np": 183,
+          "if": 0.85,
+          "avg": 167,
+          "canonicalNP": 184
+        },
+        "actual": {
+          "np": 166,
+          "if": 0.77,
+          "avg": 146,
+          "canonicalNP": 166
+        },
+        "delta": {
+          "np": -17,
+          "if": -0.08,
+          "avg": -21,
+          "npPct": -9.3
+        }
+      }
+    ]
+  },
+  {
+    "raceId": "CCRIDE_MK_26",
+    "totalRouteKm": 65.7,
+    "onRouteFrac": 1,
+    "thirds": [
+      {
+        "idx": 1,
+        "secs": 2527,
+        "plan": {
+          "np": 152,
+          "if": 0.76,
+          "avg": 146,
+          "canonicalNP": 154
+        },
+        "actual": {
+          "np": 156,
+          "if": 0.78,
+          "avg": 139,
+          "canonicalNP": 156
+        },
+        "delta": {
+          "np": 4,
+          "if": 0.02,
+          "avg": -7,
+          "npPct": 2.6
+        }
+      },
+      {
+        "idx": 2,
+        "secs": 2455,
+        "plan": {
+          "np": 153,
+          "if": 0.77,
+          "avg": 145,
+          "canonicalNP": 157
+        },
+        "actual": {
+          "np": 164,
+          "if": 0.82,
+          "avg": 144,
+          "canonicalNP": 164
+        },
+        "delta": {
+          "np": 11,
+          "if": 0.05,
+          "avg": -1,
+          "npPct": 7.2
+        }
+      },
+      {
+        "idx": 3,
+        "secs": 2714,
+        "plan": {
+          "np": 144,
+          "if": 0.72,
+          "avg": 138,
+          "canonicalNP": 145
+        },
+        "actual": {
+          "np": 163,
+          "if": 0.82,
+          "avg": 144,
+          "canonicalNP": 163
+        },
+        "delta": {
+          "np": 19,
+          "if": 0.1,
+          "avg": 6,
+          "npPct": 13.2
+        }
+      }
+    ]
+  },
+  {
+    "raceId": "PPRIDE_MK_26",
+    "totalRouteKm": 52.7,
+    "onRouteFrac": 0.9915481620606386,
+    "thirds": [
+      {
+        "idx": 1,
+        "secs": 2310,
+        "plan": {
+          "np": 164,
+          "if": 0.82,
+          "avg": 152,
+          "canonicalNP": 167
+        },
+        "actual": {
+          "np": 188,
+          "if": 0.94,
+          "avg": 169,
+          "canonicalNP": 188
+        },
+        "delta": {
+          "np": 24,
+          "if": 0.12,
+          "avg": 17,
+          "npPct": 14.6
+        }
+      },
+      {
+        "idx": 2,
+        "secs": 2522,
+        "plan": {
+          "np": 174,
+          "if": 0.87,
+          "avg": 167,
+          "canonicalNP": 175
+        },
+        "actual": {
+          "np": 175,
+          "if": 0.88,
+          "avg": 133,
+          "canonicalNP": 175
+        },
+        "delta": {
+          "np": 1,
+          "if": 0.01,
+          "avg": -34,
+          "npPct": 0.6
+        }
+      },
+      {
+        "idx": 3,
+        "secs": 2559,
+        "plan": {
+          "np": 166,
+          "if": 0.83,
+          "avg": 156,
+          "canonicalNP": 169
+        },
+        "actual": {
+          "np": 178,
+          "if": 0.89,
+          "avg": 150,
+          "canonicalNP": 178
+        },
+        "delta": {
+          "np": 12,
+          "if": 0.06,
+          "avg": -6,
+          "npPct": 7.2
+        }
+      }
+    ]
+  }
+]

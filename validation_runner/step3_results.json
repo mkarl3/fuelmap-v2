@@ -1,0 +1,128 @@
+[
+  {
+    "raceId": "TDL MK_25",
+    "fitFile": "001 TDL MK Ride.fit",
+    "parsed": {
+      "elapsedMin": 230,
+      "movingMin": 193,
+      "stoppedMin": 37,
+      "totalRecords": 11562,
+      "rawNP_fitparser": 183,
+      "rawAvgPower_fitparser": 160
+    },
+    "fuelmap": {
+      "np": 183,
+      "npCanonical": 183,
+      "avgConventionC": 160,
+      "avgConventionB": 178,
+      "kjFromMoving": 1849,
+      "kjFromActive": 1849,
+      "avgHR": 167,
+      "movingMin": 193,
+      "elapsedMin": 230,
+      "stoppedMin": 37
+    },
+    "session": {
+      "avgPower": 180,
+      "np": 184,
+      "kj": 1853,
+      "avgHR": 167,
+      "maxHR": 182,
+      "totalTimerSec": 11552.829,
+      "totalElapsedSec": 13789.822
+    },
+    "device": {
+      "movingMin": 193,
+      "elapsedMin": 230,
+      "stoppedMin": 37,
+      "np": 183,
+      "kj": 1849,
+      "avgHR": 167,
+      "avgPower": 160
+    }
+  },
+  {
+    "raceId": "CCRIDE_MK_26",
+    "fitFile": "002 CC MK Ride.fit",
+    "parsed": {
+      "elapsedMin": 144,
+      "movingMin": 128,
+      "stoppedMin": 16,
+      "totalRecords": 7711,
+      "rawNP_fitparser": 161,
+      "rawAvgPower_fitparser": 143
+    },
+    "fuelmap": {
+      "np": 161,
+      "npCanonical": 161,
+      "avgConventionC": 143,
+      "avgConventionB": 165,
+      "kjFromMoving": 1097,
+      "kjFromActive": 1097,
+      "avgHR": 154,
+      "movingMin": 128,
+      "elapsedMin": 144,
+      "stoppedMin": 16
+    },
+    "session": {
+      "avgPower": 169,
+      "np": 162,
+      "kj": 1102,
+      "avgHR": 154,
+      "maxHR": 175,
+      "totalTimerSec": 7696.606,
+      "totalElapsedSec": 8640.601
+    },
+    "device": {
+      "movingMin": 128,
+      "elapsedMin": 144,
+      "stoppedMin": 16,
+      "np": 161,
+      "kj": 1097,
+      "avgHR": 154,
+      "avgPower": 143
+    }
+  },
+  {
+    "raceId": "PPRIDE_MK_26",
+    "fitFile": "003 PP MK Ride.fit",
+    "parsed": {
+      "elapsedMin": 139,
+      "movingMin": 124,
+      "stoppedMin": 15,
+      "totalRecords": 7471,
+      "rawNP_fitparser": 181,
+      "rawAvgPower_fitparser": 150
+    },
+    "fuelmap": {
+      "np": 181,
+      "npCanonical": 181,
+      "avgConventionC": 150,
+      "avgConventionB": 200,
+      "kjFromMoving": 1117,
+      "kjFromActive": 1117,
+      "avgHR": 168,
+      "movingMin": 124,
+      "elapsedMin": 139,
+      "stoppedMin": 15
+    },
+    "session": {
+      "avgPower": 203,
+      "np": 182,
+      "kj": 1120,
+      "avgHR": 168,
+      "maxHR": 183,
+      "totalTimerSec": 7454.18,
+      "totalElapsedSec": 8351.178
+    },
+    "device": {
+      "movingMin": 124,
+      "elapsedMin": 139,
+      "stoppedMin": 15,
+      "np": 165,
+      "kj": 1117,
+      "avgHR": 168,
+      "avgPower": 150
+    }
+  }
+]
