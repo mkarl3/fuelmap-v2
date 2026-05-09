@@ -4883,6 +4883,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
 function AthletesTab({ athletes, setAthletes, activeAthleteId, setActiveAthleteId, imperial }) {
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const saveAthlete = (form) => {
     if (form.id) {
@@ -4891,6 +4892,19 @@ function AthletesTab({ athletes, setAthletes, activeAthleteId, setActiveAthleteI
       setAthletes(prev => [...prev, { ...form, id: Date.now() }]);
     }
   };
+
+  // B-26: Saved races persist plan-time state via athleteSnapshot (B-6); they
+  // remain renderable after the source athlete is deleted. No guard here.
+  const deleteAthlete = (id) => {
+    const remaining = athletes.filter(a => a.id !== id);
+    if (id === activeAthleteId && remaining.length > 0) {
+      setActiveAthleteId(remaining[0].id);
+    }
+    setAthletes(remaining);
+    setConfirmDelete(null);
+  };
+
+  const onlyOne = athletes.length === 1;
 
   return (
     <div>
@@ -4916,12 +4930,36 @@ function AthletesTab({ athletes, setAthletes, activeAthleteId, setActiveAthleteI
             {a.id === activeAthleteId && (
               <span style={{ fontSize: 11, fontFamily: "Barlow Condensed", fontWeight: 700, color: T.blue, letterSpacing: "0.08em" }}>ACTIVE</span>
             )}
-            <button className="btn-secondary" onClick={e => { e.stopPropagation(); setEditing(a); setShowModal(true); }}>Edit</button>
+            <button
+              title="Edit"
+              style={{ background: "none", border: "none", color: T.textDim, cursor: "pointer", fontSize: 14, padding: "0 4px" }}
+              onClick={e => { e.stopPropagation(); setEditing(a); setShowModal(true); }}
+            >✎</button>
+            <button
+              disabled={onlyOne}
+              title={onlyOne ? "Cannot delete the only athlete. Add another athlete first." : "Delete"}
+              style={{ background: "none", border: "none", color: T.textDim, cursor: onlyOne ? "not-allowed" : "pointer", fontSize: 14, padding: "0 4px", opacity: onlyOne ? 0.3 : 1 }}
+              onClick={e => { e.stopPropagation(); if (!onlyOne) setConfirmDelete(a); }}
+            >×</button>
           </div>
         ))}
       </div>
       {showModal && (
         <AthleteModal athlete={editing} onSave={saveAthlete} onClose={() => { setShowModal(false); setEditing(null); }} imperial={imperial} />
+      )}
+      {confirmDelete && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+          <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: 24, width: 380 }}>
+            <div className="card-header" style={{ marginBottom: 12 }}>Delete athlete?</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 20 }}>
+              Delete athlete '{confirmDelete.name}'? This cannot be undone.
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn-secondary" onClick={() => setConfirmDelete(null)}>Cancel</button>
+              <button className="btn-primary" onClick={() => deleteAthlete(confirmDelete.id)}>Delete</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -4932,11 +4970,25 @@ function AthletesTab({ athletes, setAthletes, activeAthleteId, setActiveAthleteI
 function BikesTab({ bikes, setBikes, activeBikeId, setActiveBikeId, imperial }) {
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const saveBike = (form) => {
     if (form.id) setBikes(prev => prev.map(b => b.id === form.id ? form : b));
     else setBikes(prev => [...prev, { ...form, id: Date.now() }]);
   };
+
+  // B-26: Saved races persist plan-time state via bikeSnapshot; they remain
+  // renderable after the source bike is deleted. No guard here.
+  const deleteBike = (id) => {
+    const remaining = bikes.filter(b => b.id !== id);
+    if (id === activeBikeId && remaining.length > 0) {
+      setActiveBikeId(remaining[0].id);
+    }
+    setBikes(remaining);
+    setConfirmDelete(null);
+  };
+
+  const onlyOne = bikes.length === 1;
 
   return (
     <div>
@@ -4967,45 +5019,91 @@ function BikesTab({ bikes, setBikes, activeBikeId, setActiveBikeId, imperial }) 
                   CdA {CdA} · η {eta} · Tire ×{tireMult}
                 </div>
               </div>
-              <button className="btn-secondary" onClick={e => { e.stopPropagation(); setEditing(b); setShowModal(true); }}>Edit</button>
+              <button
+                title="Edit"
+                style={{ background: "none", border: "none", color: T.textDim, cursor: "pointer", fontSize: 14, padding: "0 4px" }}
+                onClick={e => { e.stopPropagation(); setEditing(b); setShowModal(true); }}
+              >✎</button>
+              <button
+                disabled={onlyOne}
+                title={onlyOne ? "Cannot delete the only bike. Add another bike first." : "Delete"}
+                style={{ background: "none", border: "none", color: T.textDim, cursor: onlyOne ? "not-allowed" : "pointer", fontSize: 14, padding: "0 4px", opacity: onlyOne ? 0.3 : 1 }}
+                onClick={e => { e.stopPropagation(); if (!onlyOne) setConfirmDelete(b); }}
+              >×</button>
             </div>
           );
         })}
       </div>
       {showModal && <BikeModal bike={editing} onSave={saveBike} onClose={() => { setShowModal(false); setEditing(null); }} imperial={imperial} />}
+      {confirmDelete && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+          <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: 24, width: 380 }}>
+            <div className="card-header" style={{ marginBottom: 12 }}>Delete bike?</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 20 }}>
+              Delete bike '{confirmDelete.name}'? This cannot be undone.
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn-secondary" onClick={() => setConfirmDelete(null)}>Cancel</button>
+              <button className="btn-primary" onClick={() => deleteBike(confirmDelete.id)}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function LibraryTab({ products, setProducts }) {
   const [form, setForm] = useState({ name: "", carbs: 0, sodium: 0 });
+  const [editingId, setEditingId] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const isEditing = editingId !== null;
+
+  const startEdit = (p) => {
+    setEditingId(p.id);
+    setForm({ name: p.name, carbs: p.carbs, sodium: p.sodium });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setForm({ name: "", carbs: 0, sodium: 0 });
+  };
+
+  const submit = () => {
+    if (!form.name) return;
+    if (isEditing) {
+      setProducts(prev => prev.map(x => x.id === editingId ? { ...x, ...form } : x));
+    } else {
+      setProducts(prev => [...prev, { id: Date.now(), ...form }]);
+    }
+    cancelEdit();
+  };
+
+  const iconBtn = { background: "none", border: "none", color: T.textDim, cursor: "pointer", fontSize: 14, padding: "0 4px" };
 
   return (
     <div>
       <div className="card">
         <div className="card-header">Nutrition Products</div>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 80px 80px 80px", gap: 8, alignItems: "center", marginBottom: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isEditing ? "2fr 80px 80px 80px 80px" : "2fr 80px 80px 80px", gap: 8, alignItems: "center", marginBottom: 12 }}>
           <input type="text" placeholder="Product name" value={form.name} onChange={e => set("name", e.target.value)} />
           <input type="number" placeholder="Carbs g" value={form.carbs || ""} onChange={e => set("carbs", Number(e.target.value))} />
           <input type="number" placeholder="Na mg" value={form.sodium || ""} onChange={e => set("sodium", Number(e.target.value))} />
-          <button className="btn-primary" onClick={() => {
-            if (!form.name) return;
-            setProducts(prev => [...prev, { id: Date.now(), ...form }]);
-            setForm({ name: "", carbs: 0, sodium: 0 });
-          }}>Add</button>
+          <button className="btn-primary" onClick={submit}>{isEditing ? "Save" : "Add"}</button>
+          {isEditing && <button className="btn-secondary" onClick={cancelEdit}>Cancel</button>}
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 80px 80px 40px", gap: 0 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 80px 80px 56px", gap: 0 }}>
           {[["Name", "2fr"], ["Carbs", ""], ["Na (mg)", ""], ["", ""]].map(([h]) => (
             <div key={h} style={{ padding: "6px 10px", fontSize: 10, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", color: T.textMuted, textTransform: "uppercase", borderBottom: `1px solid ${T.border}` }}>{h}</div>
           ))}
           {products.map(p => (
             <>
-              <div key={`n${p.id}`} style={{ padding: "8px 10px", fontSize: 13, borderBottom: `1px solid ${T.border}` }}>{p.name}</div>
-              <div key={`c${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.gold, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}` }}>{p.carbs}g</div>
-              <div key={`s${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.textMuted, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}` }}>{p.sodium}</div>
-              <div key={`x${p.id}`} style={{ padding: "8px 10px", borderBottom: `1px solid ${T.border}` }}>
-                <button onClick={() => setProducts(prev => prev.filter(x => x.id !== p.id))} style={{ background: "none", border: "none", color: T.textDim, cursor: "pointer", fontSize: 14 }}>×</button>
+              <div key={`n${p.id}`} style={{ padding: "8px 10px", fontSize: 13, borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>{p.name}</div>
+              <div key={`c${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.gold, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>{p.carbs}g</div>
+              <div key={`s${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.textMuted, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>{p.sodium}</div>
+              <div key={`a${p.id}`} style={{ padding: "8px 4px", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 2, justifyContent: "flex-end", background: p.id === editingId ? T.surface2 : "transparent" }}>
+                <button title="Edit" onClick={() => startEdit(p)} style={iconBtn}>✎</button>
+                <button title="Delete" onClick={() => setProducts(prev => prev.filter(x => x.id !== p.id))} style={iconBtn}>×</button>
               </div>
             </>
           ))}
