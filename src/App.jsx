@@ -1351,8 +1351,18 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
     ...athlete,
   });
   const [cpOpen, setCpOpen] = useState(false);
-  const [overrideOpen, setOverrideOpen] = useState(false);
-  const [overrideVal, setOverrideVal] = useState("");
+
+  // B-24: Override section auto-opens for existing athletes whose saved
+  // `wPrime` is set, so the user can see the value driving Tier 0 and clear
+  // it if desired. New athletes (`id === null`) start with the section
+  // closed regardless of the form's wPrime default — they shouldn't be
+  // pre-saddled with an override they didn't ask for.
+  const _initialWPrimeJ = Number(athlete?.wPrime);
+  const _hasInitialOverride = athlete?.id != null && _initialWPrimeJ > 0;
+  const [overrideOpen, setOverrideOpen] = useState(_hasInitialOverride);
+  const [overrideVal, setOverrideVal] = useState(
+    _hasInitialOverride ? String(Math.round(_initialWPrimeJ / 100) / 10) : ""
+  );
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   // Local display string for weight — avoids mid-keystroke unit conversion mangling the field
@@ -1360,9 +1370,28 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
     imperial ? String(Math.round((athlete.weight ?? 0) * 2.205 * 10) / 10) : String(athlete.weight ?? 0)
   );
 
-  // Live-derive W' from current form state
-  const derivedWPrime = _physicsUnwrap(deriveWPrime(form), DEFAULTS.wPrimeFallbackJ);
+  // B-24: Live derivation that ignores `form.wPrime` (the override path).
+  // The "Anaerobic Reserve" display in this modal needs to react to live
+  // edits of phenotype/FTP/cpTests so the user sees what *would* be saved
+  // if they cleared the override. Passing `wPrime: null` to deriveWPrime
+  // forces Tier 0 to skip and walks Tier 1 → 2 → 3 from current form state.
+  const derivedWPrime = _physicsUnwrap(
+    deriveWPrime({ ...form, wPrime: null }),
+    DEFAULTS.wPrimeFallbackJ,
+  );
   const cpResult = computeCP(form.cpTests);
+
+  // B-24: Single source of truth for "is the override active?" — purely the
+  // input field's content (whitespace-only treated as empty). NOT gated on
+  // `overrideOpen` (which is just visual chrome — collapsing the section
+  // shouldn't silently clear the value).
+  const _overrideTrimmed = overrideVal.trim();
+  const overrideJ = _overrideTrimmed === ""
+    ? null
+    : Math.round(Number(_overrideTrimmed) * 1000);
+  // Active W' the form would save right now: override wins when set; else
+  // the live derivation walks the lower tiers.
+  const activeWPrimeJ = (overrideJ != null && overrideJ > 0) ? overrideJ : derivedWPrime;
 
   // Determine confidence label
   const hasValidCpTests = cpResult !== null;
@@ -1406,12 +1435,12 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
 
   const handleSave = () => {
     const saved = { ...form };
-    // Apply override if set
-    if (overrideOpen && overrideVal !== "") {
-      saved.wPrime = Math.round(Number(overrideVal) * 1000);
-    } else {
-      saved.wPrime = derivedWPrime;
-    }
+    // B-24: Override input is the authoritative write path for `wPrime`.
+    // When the field has content → store the override (J). When empty/cleared
+    // → store `null` so deriveWPrime's Tier 0 skips and lower tiers (CP test /
+    // phenotype / FTP) drive the math. Storing 0 would collide with Tier 0's
+    // `> 0` guard and is semantically different — avoid.
+    saved.wPrime = (overrideJ != null && overrideJ > 0) ? overrideJ : null;
     // Stamp cpTestedAt if tests are valid and not previously stamped
     if (hasValidCpTests && !saved.cpTestedAt) saved.cpTestedAt = new Date().toISOString();
     onSave(saved);
@@ -1419,9 +1448,10 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
   };
 
   const ph = RIDER_PHENOTYPES.find(p => p.id === form.phenotype);
-  const displayWkJ = (overrideOpen && overrideVal !== "")
-    ? (Math.round(Number(overrideVal) * 10) / 10)
-    : (Math.round(derivedWPrime / 100) / 10);
+  // B-24: Display reflects what would be saved right now — same priority as
+  // handleSave (override → derivation). Updates reactively on every input
+  // change because both `overrideJ` and `derivedWPrime` are computed inline.
+  const displayWkJ = Math.round(activeWPrimeJ / 100) / 10;
 
   const sectionDivider = (label) => (
     <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "20px 0 14px" }}>
