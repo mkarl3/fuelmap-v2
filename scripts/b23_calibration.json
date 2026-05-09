@@ -1,0 +1,609 @@
+{
+  "formula": {
+    "name": "sharp",
+    "SURGE_DURATION_FLOOR_SEC": 60,
+    "SURGE_DURATION_CEIL_SEC": 240,
+    "SURGE_GRADE_FLOOR_PCT": 4,
+    "SURGE_GRADE_CEIL_PCT": 6,
+    "SURGE_CAP_MIN": 1.05,
+    "SURGE_CAP_MAX": 1.55,
+    "SURGE_FACTOR_THRESHOLD": 0.1,
+    "FLOOR_AT_BASE_CAP": true
+  },
+  "candidates": [
+    {
+      "name": "starter",
+      "summary": {
+        "count": 9,
+        "MAE": 0.083,
+        "maxAbs": 0.209,
+        "constrainingCount": 3,
+        "constrainingMAE": 0.124,
+        "constrainingMax": 0.209
+      }
+    },
+    {
+      "name": "tightened",
+      "summary": {
+        "count": 9,
+        "MAE": 0.092,
+        "maxAbs": 0.216,
+        "constrainingCount": 1,
+        "constrainingMAE": 0.047,
+        "constrainingMax": 0.047
+      }
+    },
+    {
+      "name": "sharp",
+      "summary": {
+        "count": 9,
+        "MAE": 0.052,
+        "maxAbs": 0.147,
+        "constrainingCount": 5,
+        "constrainingMAE": 0.035,
+        "constrainingMax": 0.047
+      }
+    }
+  ],
+  "summary": {
+    "count": 9,
+    "MAE": 0.052,
+    "maxAbs": 0.147,
+    "constrainingCount": 5,
+    "constrainingMAE": 0.035,
+    "constrainingMax": 0.047
+  },
+  "fixtures": [
+    {
+      "raceId": "TDL MK_25",
+      "route": {
+        "totalDistKm": 97.5,
+        "elevGainM": 685,
+        "climbCount": 8
+      },
+      "rows": [
+        {
+          "fixture": "TDL MK_25",
+          "climbId": 1,
+          "ftp": 215,
+          "startDistKm": 1.9,
+          "lengthKm": 1.9,
+          "avgGradePct": 4.1,
+          "peakGradePct": 6.8,
+          "category": "moderate",
+          "currentCapW": 231,
+          "baseCapMult": 1.074,
+          "predicted": {
+            "secondsInClimb": 343,
+            "np": 237,
+            "avgP": 237
+          },
+          "actual": {
+            "secondsInClimb": 374,
+            "np": 241,
+            "avgP": 236
+          },
+          "impliedCapMult": 1.121,
+          "formulaCapMult": 1.074,
+          "delta": -0.047,
+          "outlier": null
+        },
+        {
+          "fixture": "TDL MK_25",
+          "climbId": 2,
+          "ftp": 215,
+          "startDistKm": 16.6,
+          "lengthKm": 0.5,
+          "avgGradePct": 3.6,
+          "peakGradePct": 3.6,
+          "category": "moderate",
+          "currentCapW": 231,
+          "baseCapMult": 1.074,
+          "predicted": {
+            "secondsInClimb": 83,
+            "np": 231,
+            "avgP": 231
+          },
+          "actual": {
+            "secondsInClimb": 88,
+            "np": 273,
+            "avgP": 268
+          },
+          "impliedCapMult": 1.27,
+          "formulaCapMult": 1.074,
+          "delta": -0.196,
+          "outlier": "rider_over_pushing"
+        },
+        {
+          "fixture": "TDL MK_25",
+          "climbId": 3,
+          "ftp": 215,
+          "startDistKm": 21.4,
+          "lengthKm": 0.5,
+          "avgGradePct": 4.2,
+          "peakGradePct": 4.2,
+          "category": "moderate",
+          "currentCapW": 231,
+          "baseCapMult": 1.074,
+          "predicted": {
+            "secondsInClimb": 89,
+            "np": 231,
+            "avgP": 231
+          },
+          "actual": {
+            "secondsInClimb": 95,
+            "np": 233,
+            "avgP": 237
+          },
+          "impliedCapMult": 1.084,
+          "formulaCapMult": 1.074,
+          "delta": -0.01,
+          "outlier": null
+        },
+        {
+          "fixture": "TDL MK_25",
+          "climbId": 4,
+          "ftp": 215,
+          "startDistKm": 31.7,
+          "lengthKm": 0.5,
+          "avgGradePct": 3.9,
+          "peakGradePct": 3.9,
+          "category": "moderate",
+          "currentCapW": 231,
+          "baseCapMult": 1.074,
+          "predicted": {
+            "secondsInClimb": 84,
+            "np": 231,
+            "avgP": 231
+          },
+          "actual": {
+            "secondsInClimb": 97,
+            "np": 240,
+            "avgP": 240
+          },
+          "impliedCapMult": 1.116,
+          "formulaCapMult": 1.074,
+          "delta": -0.042,
+          "outlier": null
+        },
+        {
+          "fixture": "TDL MK_25",
+          "climbId": 5,
+          "ftp": 215,
+          "startDistKm": 38.5,
+          "lengthKm": 0.5,
+          "avgGradePct": 4.2,
+          "peakGradePct": 4.2,
+          "category": "moderate",
+          "currentCapW": 231,
+          "baseCapMult": 1.074,
+          "predicted": {
+            "secondsInClimb": 92,
+            "np": 231,
+            "avgP": 231
+          },
+          "actual": {
+            "secondsInClimb": 91,
+            "np": 241,
+            "avgP": 239
+          },
+          "impliedCapMult": 1.121,
+          "formulaCapMult": 1.074,
+          "delta": -0.047,
+          "outlier": null
+        },
+        {
+          "fixture": "TDL MK_25",
+          "climbId": 6,
+          "ftp": 215,
+          "startDistKm": 40.5,
+          "lengthKm": 0.5,
+          "avgGradePct": 3,
+          "peakGradePct": 3,
+          "category": "moderate",
+          "currentCapW": 231,
+          "baseCapMult": 1.074,
+          "predicted": {
+            "secondsInClimb": 72,
+            "np": 228,
+            "avgP": 211
+          },
+          "actual": {
+            "secondsInClimb": 81,
+            "np": 218,
+            "avgP": 200
+          },
+          "impliedCapMult": 1.014,
+          "formulaCapMult": 1.074,
+          "delta": 0.06,
+          "outlier": null
+        },
+        {
+          "fixture": "TDL MK_25",
+          "climbId": 7,
+          "ftp": 215,
+          "startDistKm": 43.9,
+          "lengthKm": 0.5,
+          "avgGradePct": 4.8,
+          "peakGradePct": 4.8,
+          "category": "moderate",
+          "currentCapW": 231,
+          "baseCapMult": 1.074,
+          "predicted": {
+            "secondsInClimb": 97,
+            "np": 231,
+            "avgP": 231
+          },
+          "actual": {
+            "secondsInClimb": 115,
+            "np": 224,
+            "avgP": 225
+          },
+          "impliedCapMult": 1.042,
+          "formulaCapMult": 1.189,
+          "delta": 0.147,
+          "outlier": null
+        },
+        {
+          "fixture": "TDL MK_25",
+          "climbId": 8,
+          "ftp": 215,
+          "startDistKm": 48.7,
+          "lengthKm": 0.5,
+          "avgGradePct": 4.5,
+          "peakGradePct": 4.5,
+          "category": "moderate",
+          "currentCapW": 231,
+          "baseCapMult": 1.074,
+          "predicted": {
+            "secondsInClimb": 93,
+            "np": 231,
+            "avgP": 231
+          },
+          "actual": {
+            "secondsInClimb": 90,
+            "np": 231,
+            "avgP": 232
+          },
+          "impliedCapMult": 1.074,
+          "formulaCapMult": 1.154,
+          "delta": 0.08,
+          "outlier": null
+        }
+      ]
+    },
+    {
+      "raceId": "CCRIDE_MK_26",
+      "route": {
+        "totalDistKm": 65.7,
+        "elevGainM": 233,
+        "climbCount": 0
+      },
+      "rows": []
+    },
+    {
+      "raceId": "PPRIDE_MK_26",
+      "route": {
+        "totalDistKm": 52.7,
+        "elevGainM": 331,
+        "climbCount": 2
+      },
+      "rows": [
+        {
+          "fixture": "PPRIDE_MK_26",
+          "climbId": 1,
+          "ftp": 200,
+          "startDistKm": 23.4,
+          "lengthKm": 0.3,
+          "avgGradePct": 5.1,
+          "peakGradePct": 5.1,
+          "category": "moderate",
+          "currentCapW": 210,
+          "baseCapMult": 1.05,
+          "predicted": {
+            "secondsInClimb": 70,
+            "np": 210,
+            "avgP": 210
+          },
+          "actual": {
+            "secondsInClimb": 60,
+            "np": 271,
+            "avgP": 253
+          },
+          "impliedCapMult": 1.355,
+          "formulaCapMult": 1.325,
+          "delta": -0.03,
+          "outlier": null
+        },
+        {
+          "fixture": "PPRIDE_MK_26",
+          "climbId": 2,
+          "ftp": 200,
+          "startDistKm": 40.6,
+          "lengthKm": 0.3,
+          "avgGradePct": 6.1,
+          "peakGradePct": 6.1,
+          "category": "steep",
+          "currentCapW": 230,
+          "baseCapMult": 1.15,
+          "predicted": {
+            "secondsInClimb": 72,
+            "np": 228,
+            "avgP": 225
+          },
+          "actual": {
+            "secondsInClimb": 67,
+            "np": 306,
+            "avgP": 294
+          },
+          "impliedCapMult": 1.53,
+          "formulaCapMult": 1.531,
+          "delta": 0.001,
+          "outlier": null
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "fixture": "TDL MK_25",
+      "climbId": 1,
+      "ftp": 215,
+      "startDistKm": 1.9,
+      "lengthKm": 1.9,
+      "avgGradePct": 4.1,
+      "peakGradePct": 6.8,
+      "category": "moderate",
+      "currentCapW": 231,
+      "baseCapMult": 1.074,
+      "predicted": {
+        "secondsInClimb": 343,
+        "np": 237,
+        "avgP": 237
+      },
+      "actual": {
+        "secondsInClimb": 374,
+        "np": 241,
+        "avgP": 236
+      },
+      "impliedCapMult": 1.121,
+      "formulaCapMult": 1.074,
+      "delta": -0.047,
+      "outlier": null
+    },
+    {
+      "fixture": "TDL MK_25",
+      "climbId": 2,
+      "ftp": 215,
+      "startDistKm": 16.6,
+      "lengthKm": 0.5,
+      "avgGradePct": 3.6,
+      "peakGradePct": 3.6,
+      "category": "moderate",
+      "currentCapW": 231,
+      "baseCapMult": 1.074,
+      "predicted": {
+        "secondsInClimb": 83,
+        "np": 231,
+        "avgP": 231
+      },
+      "actual": {
+        "secondsInClimb": 88,
+        "np": 273,
+        "avgP": 268
+      },
+      "impliedCapMult": 1.27,
+      "formulaCapMult": 1.074,
+      "delta": -0.196,
+      "outlier": "rider_over_pushing"
+    },
+    {
+      "fixture": "TDL MK_25",
+      "climbId": 3,
+      "ftp": 215,
+      "startDistKm": 21.4,
+      "lengthKm": 0.5,
+      "avgGradePct": 4.2,
+      "peakGradePct": 4.2,
+      "category": "moderate",
+      "currentCapW": 231,
+      "baseCapMult": 1.074,
+      "predicted": {
+        "secondsInClimb": 89,
+        "np": 231,
+        "avgP": 231
+      },
+      "actual": {
+        "secondsInClimb": 95,
+        "np": 233,
+        "avgP": 237
+      },
+      "impliedCapMult": 1.084,
+      "formulaCapMult": 1.074,
+      "delta": -0.01,
+      "outlier": null
+    },
+    {
+      "fixture": "TDL MK_25",
+      "climbId": 4,
+      "ftp": 215,
+      "startDistKm": 31.7,
+      "lengthKm": 0.5,
+      "avgGradePct": 3.9,
+      "peakGradePct": 3.9,
+      "category": "moderate",
+      "currentCapW": 231,
+      "baseCapMult": 1.074,
+      "predicted": {
+        "secondsInClimb": 84,
+        "np": 231,
+        "avgP": 231
+      },
+      "actual": {
+        "secondsInClimb": 97,
+        "np": 240,
+        "avgP": 240
+      },
+      "impliedCapMult": 1.116,
+      "formulaCapMult": 1.074,
+      "delta": -0.042,
+      "outlier": null
+    },
+    {
+      "fixture": "TDL MK_25",
+      "climbId": 5,
+      "ftp": 215,
+      "startDistKm": 38.5,
+      "lengthKm": 0.5,
+      "avgGradePct": 4.2,
+      "peakGradePct": 4.2,
+      "category": "moderate",
+      "currentCapW": 231,
+      "baseCapMult": 1.074,
+      "predicted": {
+        "secondsInClimb": 92,
+        "np": 231,
+        "avgP": 231
+      },
+      "actual": {
+        "secondsInClimb": 91,
+        "np": 241,
+        "avgP": 239
+      },
+      "impliedCapMult": 1.121,
+      "formulaCapMult": 1.074,
+      "delta": -0.047,
+      "outlier": null
+    },
+    {
+      "fixture": "TDL MK_25",
+      "climbId": 6,
+      "ftp": 215,
+      "startDistKm": 40.5,
+      "lengthKm": 0.5,
+      "avgGradePct": 3,
+      "peakGradePct": 3,
+      "category": "moderate",
+      "currentCapW": 231,
+      "baseCapMult": 1.074,
+      "predicted": {
+        "secondsInClimb": 72,
+        "np": 228,
+        "avgP": 211
+      },
+      "actual": {
+        "secondsInClimb": 81,
+        "np": 218,
+        "avgP": 200
+      },
+      "impliedCapMult": 1.014,
+      "formulaCapMult": 1.074,
+      "delta": 0.06,
+      "outlier": null
+    },
+    {
+      "fixture": "TDL MK_25",
+      "climbId": 7,
+      "ftp": 215,
+      "startDistKm": 43.9,
+      "lengthKm": 0.5,
+      "avgGradePct": 4.8,
+      "peakGradePct": 4.8,
+      "category": "moderate",
+      "currentCapW": 231,
+      "baseCapMult": 1.074,
+      "predicted": {
+        "secondsInClimb": 97,
+        "np": 231,
+        "avgP": 231
+      },
+      "actual": {
+        "secondsInClimb": 115,
+        "np": 224,
+        "avgP": 225
+      },
+      "impliedCapMult": 1.042,
+      "formulaCapMult": 1.189,
+      "delta": 0.147,
+      "outlier": null
+    },
+    {
+      "fixture": "TDL MK_25",
+      "climbId": 8,
+      "ftp": 215,
+      "startDistKm": 48.7,
+      "lengthKm": 0.5,
+      "avgGradePct": 4.5,
+      "peakGradePct": 4.5,
+      "category": "moderate",
+      "currentCapW": 231,
+      "baseCapMult": 1.074,
+      "predicted": {
+        "secondsInClimb": 93,
+        "np": 231,
+        "avgP": 231
+      },
+      "actual": {
+        "secondsInClimb": 90,
+        "np": 231,
+        "avgP": 232
+      },
+      "impliedCapMult": 1.074,
+      "formulaCapMult": 1.154,
+      "delta": 0.08,
+      "outlier": null
+    },
+    {
+      "fixture": "PPRIDE_MK_26",
+      "climbId": 1,
+      "ftp": 200,
+      "startDistKm": 23.4,
+      "lengthKm": 0.3,
+      "avgGradePct": 5.1,
+      "peakGradePct": 5.1,
+      "category": "moderate",
+      "currentCapW": 210,
+      "baseCapMult": 1.05,
+      "predicted": {
+        "secondsInClimb": 70,
+        "np": 210,
+        "avgP": 210
+      },
+      "actual": {
+        "secondsInClimb": 60,
+        "np": 271,
+        "avgP": 253
+      },
+      "impliedCapMult": 1.355,
+      "formulaCapMult": 1.325,
+      "delta": -0.03,
+      "outlier": null
+    },
+    {
+      "fixture": "PPRIDE_MK_26",
+      "climbId": 2,
+      "ftp": 200,
+      "startDistKm": 40.6,
+      "lengthKm": 0.3,
+      "avgGradePct": 6.1,
+      "peakGradePct": 6.1,
+      "category": "steep",
+      "currentCapW": 230,
+      "baseCapMult": 1.15,
+      "predicted": {
+        "secondsInClimb": 72,
+        "np": 228,
+        "avgP": 225
+      },
+      "actual": {
+        "secondsInClimb": 67,
+        "np": 306,
+        "avgP": 294
+      },
+      "impliedCapMult": 1.53,
+      "formulaCapMult": 1.531,
+      "delta": 0.001,
+      "outlier": null
+    }
+  ]
+}
