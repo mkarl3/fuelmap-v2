@@ -201,13 +201,36 @@ const CLIMB_CATEGORIES = [
 // Realistic glycogen: ~300g base + small weight component (trained athlete)
 function startingGlycogen(weightKg) { return Math.round(weightKg * 5.5); }
 
+// Pre-race fueling presets — drive the starting glycogen reserve in
+// buildNutritionOverlay. Replaced the 0–300g slider that conflated single-meal
+// size with multi-day carb-loading state. Four user-friendly behavioral states
+// map to scaling factors on the weight-based glycogen baseline (`weight × 5.5g`).
+// Calibrated to span the existing 0.70–1.15 model range; "carb-loaded" sits at
+// 1.10 (below the 1.15 cap) so it's never literally saturating.
+const PRE_RACE_FUELING = [
+  { id: "fasted",      label: "Fasted",      helper: "No meal in 4+ hours",                 glycogenScale: 0.70 },
+  { id: "light_meal",  label: "Light meal",  helper: "~30–60g carbs (banana, half bagel)",  glycogenScale: 0.82 },
+  { id: "full_meal",   label: "Full meal",   helper: "~80–150g carbs (full breakfast)",     glycogenScale: 0.92 },
+  { id: "carb_loaded", label: "Carb-loaded", helper: "Multi-day loading + race-day meal",   glycogenScale: 1.10 },
+];
+const PRE_RACE_FUELING_DEFAULT_ID = "light_meal";
+
+function fuelingScale(id) {
+  const preset = PRE_RACE_FUELING.find(p => p.id === id);
+  if (preset) return preset.glycogenScale;
+  // Unknown id (corrupt save, future-version downgrade) → default.
+  return PRE_RACE_FUELING.find(p => p.id === PRE_RACE_FUELING_DEFAULT_ID).glycogenScale;
+}
+
 // 4C sub-step 1: fully parameterized on `blockMinutes` so the function works
 // at any block resolution. All internal time-dependent constants now scale
 // with the block size. Callers pass `blockMinutes=1` post-rebuild (1-min
 // powerStream on plan side; 1-min aggregated FIT stream on actual side).
-function buildNutritionOverlay(stream, intakeEvents, athlete, preRaceMeal, blockMinutes = 1) {
+//
+// `glycogenScale`: multiplier on weight-based starting glycogen. Caller derives
+// from `fuelingScale(preRaceFuelingId)` (see PRE_RACE_FUELING constants).
+function buildNutritionOverlay(stream, intakeEvents, athlete, glycogenScale, blockMinutes = 1) {
   if (!stream || stream.length === 0) return [];
-  const glycogenScale = 0.7 + (preRaceMeal / 300) * 0.45;
   let glycogenReserve = Math.round(startingGlycogen(athlete.weight) * glycogenScale);
   const maxGlycogen = startingGlycogen(athlete.weight) * 1.15;
   const MAX_ABSORPTION = 90; // g/hr max intestinal absorption
@@ -1709,7 +1732,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   const [numSegments, setNumSegments] = useState(3);
   const [segments, setSegments] = useState([]);
   const [pacingPlan, setPacingPlan] = useState(null);
-  const [preRaceMeal, setPreRaceMeal] = useState(120);
+  const [preRaceFueling, setPreRaceFueling] = useState(PRE_RACE_FUELING_DEFAULT_ID);
   const [intakeEvents, setIntakeEvents] = useState([]);
   const [planName, setPlanName] = useState("Race Plan");
   const [saved, setSaved] = useState(false);
@@ -1838,7 +1861,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   };
 
   const overlayData = pacingPlan
-    ? buildNutritionOverlay(pacingPlan.powerStream, intakeEvents, athlete, preRaceMeal, 1) : [];
+    ? buildNutritionOverlay(pacingPlan.powerStream, intakeEvents, athlete, fuelingScale(preRaceFueling), 1) : [];
   // CC#7 (Prompt 4B Step 2): prefer per-second stream at dt=1 for PLAN-side
   // W'bal — matches ANALYZE side's 1-sec math and device numbers. Legacy
   // plans (saved before 4B) lack `powerStreamPerSec`; fall back to 1-min
@@ -1889,7 +1912,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         route: gpxStats,
         gpxFileName: gpxFile,
         pacingPlan,
-        nutritionPlan: { preRaceMeal, intakeEvents: [...intakeEvents] },
+        nutritionPlan: { preRaceFueling, intakeEvents: [...intakeEvents] },
         conditions: { ...weatherContext },
         surfaceMix: [...surfaceMix],
         climbCategories: { ...climbCategories },
@@ -1936,7 +1959,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     setGoalTimeMin(race.plan.goalTimeMin ?? 240);
     setSegments(race.plan.segments ?? []);
     setNumSegments(race.plan.segments?.length ?? 3);
-    setPreRaceMeal(race.plan.nutritionPlan?.preRaceMeal ?? 120);
+    // Migration: legacy saves stored `preRaceMeal` as 0–300g; per B-32-ish
+    // nutrition rework, the new field is `preRaceFueling` preset id. Legacy
+    // saves fall through to the default per Mike's call (no per-gram bucketing).
+    setPreRaceFueling(race.plan.nutritionPlan?.preRaceFueling ?? PRE_RACE_FUELING_DEFAULT_ID);
     setIntakeEvents(race.plan.nutritionPlan?.intakeEvents ?? []);
     setPlanName(race.name);
     setPacingPlan(null);
@@ -2712,11 +2738,27 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           <div className="card-header">04 — Nutrition Plan</div>
 
           <div style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-              <label style={{ fontSize: 12, color: T.textMuted }}>Pre-race Meal Carbs</label>
-              <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700 }}>{preRaceMeal}g</span>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8 }}>Pre-Race Fueling</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {PRE_RACE_FUELING.map(preset => {
+                const active = preRaceFueling === preset.id;
+                return (
+                  <button key={preset.id}
+                    onClick={() => setPreRaceFueling(preset.id)}
+                    style={{
+                      flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3,
+                      background: active ? T.surface : T.surface2,
+                      border: `1px solid ${active ? T.blue : T.border}`,
+                      color: active ? T.text : T.textMuted,
+                      padding: "8px 10px", borderRadius: 4, cursor: "pointer",
+                      textAlign: "left", transition: "all 0.15s",
+                    }}>
+                    <span style={{ fontSize: 12, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>{preset.label}</span>
+                    <span style={{ fontSize: 10, color: active ? T.textMuted : T.textDim, lineHeight: 1.3 }}>{preset.helper}</span>
+                  </button>
+                );
+              })}
             </div>
-            <input type="range" min="0" max="300" value={preRaceMeal} onChange={e => setPreRaceMeal(Number(e.target.value))} />
           </div>
 
           <IntakeForm products={products} onAdd={e => setIntakeEvents(prev => [...prev, e].sort((a, b) => a.time - b.time))} maxTime={pacingPlan.estimatedDurationMin} />
@@ -2726,14 +2768,14 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
 
           {overlayData.length > 0 && (
             <>
-              <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Glycogen Reserve</div>
-              <GlycogenChart overlayData={overlayData} athlete={athlete} durationMin={pacingPlan.correctedDurationMin} estimatedDurationMin={pacingPlan.estimatedDurationMin} />
               <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Cumulative Burn vs Intake</div>
               <BurnRateChart overlayData={overlayData} durationMin={pacingPlan?.correctedDurationMin} blockMin={2} estimatedDurationMin={pacingPlan?.estimatedDurationMin} />
+              <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Glycogen Reserve</div>
+              <GlycogenChart overlayData={overlayData} athlete={athlete} durationMin={pacingPlan.correctedDurationMin} estimatedDurationMin={pacingPlan.estimatedDurationMin} />
               <div style={{ marginTop: 12, padding: "10px 14px", background: T.surface2, borderRadius: 4, fontSize: 12 }}>
-                <span style={{ color: T.textMuted }}>Total planned carbs: </span>
+                <span style={{ color: T.textMuted }}>Total in-ride carbs: </span>
                 <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, color: T.blue }}>
-                  {intakeEvents.reduce((s, e) => s + e.carbs, 0) + preRaceMeal}g
+                  {intakeEvents.reduce((s, e) => s + e.carbs, 0)}g
                 </span>
                 <span style={{ color: T.textMuted, marginLeft: 16 }}>Avg intake rate: </span>
                 <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, color: T.blue }}>
@@ -2901,6 +2943,10 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   const [actualIntake, setActualIntake] = useState([]);
   const [fitError, setFitError] = useState(null);
   const [noPowerToastDismissed, setNoPowerToastDismissed] = useState(false);
+  // Pre-race fueling state for ANALYZE-side glycogen overlay. Defaults to the
+  // plan's setting when a race is loaded; falls back to "light_meal" otherwise.
+  // User can override on ANALYZE if their actual race-morning prep differed.
+  const [analyzePreRaceFueling, setAnalyzePreRaceFueling] = useState(PRE_RACE_FUELING_DEFAULT_ID);
   // B-32: visible while parseFIT runs AND while the subsequent render's
   // alignFitToGpx useMemo blocks (5–9s on typical fixtures). Cleared in the
   // same render that paints results.
@@ -2914,8 +2960,16 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
 
   // When the selected race changes, auto-load stored FIT data if present.
   useEffect(() => {
-    if (!selectedRaceId) { setFitSaved(false); setNoPowerToastDismissed(false); return; }
+    if (!selectedRaceId) {
+      setFitSaved(false); setNoPowerToastDismissed(false);
+      setAnalyzePreRaceFueling(PRE_RACE_FUELING_DEFAULT_ID);
+      return;
+    }
     const race = races.find(r => r.id === Number(selectedRaceId));
+    // Sync ANALYZE-side pre-race fueling to the plan's value (legacy saves
+    // without preRaceFueling fall through to the default — see migration in
+    // PlanTab loader). User can still override on ANALYZE after this.
+    setAnalyzePreRaceFueling(race?.plan?.nutritionPlan?.preRaceFueling ?? PRE_RACE_FUELING_DEFAULT_ID);
     if (race?.fit) {
       setFitData(race.fit);
       setFitFile(race.fit.fileName ?? 'Saved FIT');
@@ -3039,7 +3093,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   }, [fitData?.movingPowerSeries, fitData?.movingHRSeries, fitData?.movingDistSeries, athlete.ftp]);
 
   const fitOverlay = fitMinStream.length
-    ? buildNutritionOverlay(fitMinStream, actualIntake, athlete, 120, 1) : [];
+    ? buildNutritionOverlay(fitMinStream, actualIntake, athlete, fuelingScale(analyzePreRaceFueling), 1) : [];
 
   // CC#8 (Prompt 4B Step 5): per-second FIT-to-GPX alignment. One pass; both
   // bucketByTerrain and perClimbStats consume the same alignment array. Off-
@@ -4883,6 +4937,29 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       {fitMinStream.length > 0 && (
         <div className="card">
           <div className="card-header">Nutrition Analysis</div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8 }}>Pre-Race Fueling</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {PRE_RACE_FUELING.map(preset => {
+                const active = analyzePreRaceFueling === preset.id;
+                return (
+                  <button key={preset.id}
+                    onClick={() => setAnalyzePreRaceFueling(preset.id)}
+                    style={{
+                      flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3,
+                      background: active ? T.surface : T.surface2,
+                      border: `1px solid ${active ? T.blue : T.border}`,
+                      color: active ? T.text : T.textMuted,
+                      padding: "8px 10px", borderRadius: 4, cursor: "pointer",
+                      textAlign: "left", transition: "all 0.15s",
+                    }}>
+                    <span style={{ fontSize: 12, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>{preset.label}</span>
+                    <span style={{ fontSize: 10, color: active ? T.textMuted : T.textDim, lineHeight: 1.3 }}>{preset.helper}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           <IntakeForm products={products} onAdd={e => setActualIntake(prev => [...prev, e].sort((a, b) => a.time - b.time))} maxTime={fitData?.durationMin || 360} />
           {actualIntake.map(e => (
             <IntakeRow key={e.id} event={e} products={products} onRemove={() => setActualIntake(prev => prev.filter(x => x.id !== e.id))} />
