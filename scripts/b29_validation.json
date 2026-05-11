@@ -8,12 +8,12 @@
     "wPrimeOver": 21700,
     "plan": {
       "flatIF": 0.784,
-      "np": 186,
-      "avgPower": 167,
-      "ifActual": 0.87,
-      "tss": 228,
+      "np": 185,
+      "avgPower": 166,
+      "ifActual": 0.86,
+      "tss": 223,
       "durationMin": 181,
-      "surgeApplied": 2,
+      "surgeApplied": 1,
       "surgeDetails": [
         {
           "climbId": 1,
@@ -47,7 +47,7 @@
           "peakGradePct": 4.2,
           "predictedDurationSec": 89,
           "baseCapMult": 1.074,
-          "surge": 0.084,
+          "surge": 0,
           "capMult": 1.074,
           "capW": 231
         },
@@ -71,7 +71,7 @@
           "peakGradePct": 4.2,
           "predictedDurationSec": 92,
           "baseCapMult": 1.074,
-          "surge": 0.082,
+          "surge": 0,
           "capMult": 1.074,
           "capW": 231
         },
@@ -95,9 +95,9 @@
           "peakGradePct": 4.8,
           "predictedDurationSec": 97,
           "baseCapMult": 1.074,
-          "surge": 0.318,
-          "capMult": 1.209,
-          "capW": 260
+          "surge": 0.159,
+          "capMult": 1.129,
+          "capW": 243
         },
         {
           "climbId": 8,
@@ -107,9 +107,9 @@
           "peakGradePct": 4.5,
           "predictedDurationSec": 93,
           "baseCapMult": 1.074,
-          "surge": 0.204,
-          "capMult": 1.152,
-          "capW": 248
+          "surge": 0,
+          "capMult": 1.074,
+          "capW": 231
         }
       ]
     },
@@ -169,17 +169,17 @@
         },
         {
           "binPct": 50,
-          "predPct": 77,
+          "predPct": 81,
           "actPct": 79
         },
         {
           "binPct": 60,
-          "predPct": 86,
+          "predPct": 88,
           "actPct": 82
         },
         {
           "binPct": 70,
-          "predPct": 95,
+          "predPct": 96,
           "actPct": 87
         },
         {
@@ -194,7 +194,7 @@
         },
         {
           "binPct": 100,
-          "predPct": 85,
+          "predPct": 84,
           "actPct": 94
         }
       ]
@@ -232,17 +232,17 @@
         },
         {
           "binPct": 50,
-          "predPct": 77,
+          "predPct": 81,
           "actPct": 79
         },
         {
           "binPct": 60,
-          "predPct": 86,
+          "predPct": 88,
           "actPct": 82
         },
         {
           "binPct": 70,
-          "predPct": 95,
+          "predPct": 96,
           "actPct": 87
         },
         {
@@ -257,7 +257,7 @@
         },
         {
           "binPct": 100,
-          "predPct": 85,
+          "predPct": 84,
           "actPct": 94
         }
       ]
@@ -323,7 +323,7 @@
         "lengthKm": 0.5,
         "peakGradePct": 4.8,
         "category": "moderate",
-        "predWbalPct": 62.8,
+        "predWbalPct": 69.1,
         "actWbalPct": 72.8
       },
       {
@@ -332,7 +332,7 @@
         "lengthKm": 0.5,
         "peakGradePct": 4.5,
         "category": "moderate",
-        "predWbalPct": 64.9,
+        "predWbalPct": 74.5,
         "actWbalPct": 63.2
       }
     ]
@@ -518,7 +518,7 @@
       "avgPower": 159,
       "ifActual": 0.87,
       "tss": 146,
-      "durationMin": 115,
+      "durationMin": 116,
       "surgeApplied": 2,
       "surgeDetails": [
         {
@@ -529,9 +529,9 @@
           "peakGradePct": 5.1,
           "predictedDurationSec": 70,
           "baseCapMult": 1.05,
-          "surge": 0.519,
-          "capMult": 1.31,
-          "capW": 262
+          "surge": 0.378,
+          "capMult": 1.239,
+          "capW": 248
         },
         {
           "climbId": 2,
@@ -576,9 +576,9 @@
       ]
     },
     "post": {
-      "predMinPct": 46.2,
+      "predMinPct": 45.4,
       "actMinPct": 0,
-      "gapPp": -46.2,
+      "gapPp": -45.4,
       "peakBurnPredJ": 420,
       "trajectory": [
         {
@@ -603,12 +603,12 @@
         },
         {
           "binPct": 50,
-          "predPct": 63,
+          "predPct": 67,
           "actPct": 8
         },
         {
           "binPct": 60,
-          "predPct": 80,
+          "predPct": 81,
           "actPct": 14
         },
         {
@@ -618,7 +618,7 @@
         },
         {
           "binPct": 80,
-          "predPct": 55,
+          "predPct": 54,
           "actPct": 12
         },
         {
@@ -640,9 +640,9 @@
     },
     "phenotypeOverride": {
       "wPrime": 22000,
-      "predMinPct": 63.3,
+      "predMinPct": 62.7,
       "actMinPct": 7.4,
-      "gapPp": -55.9,
+      "gapPp": -55.3,
       "trajectory": [
         {
           "binPct": 10,
@@ -666,12 +666,12 @@
         },
         {
           "binPct": 50,
-          "predPct": 75,
+          "predPct": 78,
           "actPct": 37
         },
         {
           "binPct": 60,
-          "predPct": 86,
+          "predPct": 87,
           "actPct": 41
         },
         {
@@ -686,7 +686,7 @@
         },
         {
           "binPct": 90,
-          "predPct": 85,
+          "predPct": 84,
           "actPct": 26
         },
         {
@@ -703,7 +703,7 @@
         "lengthKm": 0.3,
         "peakGradePct": 5.1,
         "category": "moderate",
-        "predWbalPct": 66.2,
+        "predWbalPct": 71,
         "actWbalPct": 6.5
       },
       {
@@ -712,7 +712,7 @@
         "lengthKm": 0.3,
         "peakGradePct": 6.1,
         "category": "steep",
-        "predWbalPct": 50.3,
+        "predWbalPct": 49.4,
         "actWbalPct": 0
       }
     ]

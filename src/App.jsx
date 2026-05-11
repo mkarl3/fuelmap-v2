@@ -470,6 +470,8 @@ const css = `
   .alert-info { background: rgba(0,212,255,0.1); border: 1px solid rgba(0,212,255,0.3); color: ${T.blue}; }
   .pct-pill { display: inline-block; padding: 2px 7px; border-radius: 3px; font-family: 'Barlow Condensed', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; }
   .tooltip-custom { background: ${T.surface}; border: 1px solid ${T.border}; padding: 8px 12px; border-radius: 4px; font-size: 12px; }
+  @keyframes fm-spin { to { transform: rotate(360deg); } }
+  .fm-spinner { width: 36px; height: 36px; border: 3px solid ${T.border}; border-top-color: ${T.blue}; border-radius: 50%; animation: fm-spin 0.8s linear infinite; }
 `;
 
 // ─── ZONE COLOR HELPER ────────────────────────────────────────────────────────
@@ -1065,6 +1067,11 @@ function GlycogenChart({ overlayData, athlete, durationMin, estimatedDurationMin
 }
 
 // ─── W'BAL CHART ──────────────────────────────────────────────────────────────
+// B-22: PLAN-tab W'bal advisory caption. Always present below the PLAN W'bal
+// chart; NOT shown on ANALYZE tab. Declared once so future copy iterations are
+// a single-edit change.
+const WBAL_ADVISORY_TEXT = "Predicted W'bal doesn't account for unmodeled surges from group dynamics, attacks, or other in-race variability. Use as a directional estimate.";
+
 function WbalChart({ wbalData, athlete, gpxStats = null, imperial = false, durationMin, estimatedDurationMin }) {
   if (!wbalData || wbalData.length === 0) return null;
   const wPrime = _physicsUnwrap(deriveWPrime(athlete), DEFAULTS.wPrimeFallbackJ);
@@ -2605,6 +2612,11 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             W' Balance
           </div>
           <WbalChart wbalData={wbalData} athlete={athlete} gpxStats={gpxStats} imperial={imperial} durationMin={pacingPlan.correctedDurationMin} estimatedDurationMin={pacingPlan.estimatedDurationMin} />
+          {/* B-22: advisory caption — PLAN tab only */}
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8, borderTop: `0.5px solid ${T.border}`, paddingTop: 10, marginTop: 8, fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
+            <span aria-hidden="true" style={{ flexShrink: 0, fontSize: 14, color: T.textDim, lineHeight: 1 }}>ⓘ</span>
+            <span>{WBAL_ADVISORY_TEXT}</span>
+          </div>
 
           {alerts.map((a, i) => (
             <div key={i} className={`alert alert-${a.type}`} style={{ marginTop: 8 }}>⚠ {a.msg}</div>
@@ -2889,6 +2901,10 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   const [actualIntake, setActualIntake] = useState([]);
   const [fitError, setFitError] = useState(null);
   const [noPowerToastDismissed, setNoPowerToastDismissed] = useState(false);
+  // B-32: visible while parseFIT runs AND while the subsequent render's
+  // alignFitToGpx useMemo blocks (5–9s on typical fixtures). Cleared in the
+  // same render that paints results.
+  const [fitProcessing, setFitProcessing] = useState(false);
 
   // Derived: does the loaded FIT have power / HR? Falls back to inferring from
   // the data shape, so old saved races without explicit hasPower/hasHR flags
@@ -2964,19 +2980,31 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   };
 
   const handleFIT = async (buffer, name) => {
+    // B-32: show the loading overlay BEFORE parseFIT or alignment can block.
+    // The setTimeout(0) yield is essential — without it the overlay state
+    // update and the parseFIT await would chain inside the same task, and
+    // the loading frame would never paint before the heavy work began.
+    setFitProcessing(true);
+    setFitError(null);
+    await new Promise(r => setTimeout(r, 0));
     let result = null;
     try { result = await parseFIT(buffer); }
     catch { result = null; }
     if (result) {
       setFitData(result);
       setFitFile(name);
-      setFitError(null);
       setFitSaved(false);
       // Reset the no-power dismissal so the toast reappears for each new upload.
       setNoPowerToastDismissed(false);
     } else {
       setFitError("Could not parse FIT file. Ensure the file is a valid .fit activity file, not a course or workout file.");
     }
+    // The setFitData above triggers a re-render that runs the alignFitToGpx
+    // useMemo synchronously (5–9s blocking). Clearing fitProcessing here
+    // batches with setFitData, so the overlay disappears in the same commit
+    // that paints results — the user sees the spinner during alignment and
+    // results appear when work is done.
+    setFitProcessing(false);
   };
 
   // 4C sub-step 1: 1-min FIT aggregation. Built from per-second moving series
@@ -3305,6 +3333,18 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
 
   return (
     <div>
+      {/* B-32: loading overlay during FIT processing — covers parseFIT and the
+          subsequent alignFitToGpx useMemo blocking render. */}
+      {fitProcessing && (
+        <div role="status" aria-live="polite" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200 }}>
+          <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "28px 36px", display: "flex", flexDirection: "column", alignItems: "center", gap: 16, minWidth: 240 }}>
+            <div className="fm-spinner" aria-hidden="true" />
+            <div style={{ fontSize: 12, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+              Processing ride data…
+            </div>
+          </div>
+        </div>
+      )}
       {/* Load section */}
       <div className="card">
         <div className="card-header">Load Data</div>

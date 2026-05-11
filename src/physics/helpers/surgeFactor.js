@@ -25,7 +25,7 @@
 export const SURGE_FACTOR_DEFAULTS = Object.freeze({
   SURGE_DURATION_FLOOR_SEC: 60,    // ≤60s: durationScore = 1.0 (full surge weight)
   SURGE_DURATION_CEIL_SEC:  240,   // ≥240s: durationScore = 0.0 (no surge)
-  SURGE_GRADE_FLOOR_PCT:    4.0,   // ≤4%: gradeScore = 0.0
+  SURGE_GRADE_FLOOR_PCT:    4.5,   // ≤4.5%: gradeScore = 0.0 (B-23 v1.1 — raised from 4.0 to gate TDL #7 per B-29 findings)
   SURGE_GRADE_CEIL_PCT:     6.0,   // ≥6%: gradeScore = 1.0
   SURGE_CAP_MIN:            1.05,  // surge ≥ threshold → cap mult starts here
   SURGE_CAP_MAX:            1.55,  // surge = 1.0 → cap mult ends here
