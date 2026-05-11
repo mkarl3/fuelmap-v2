@@ -1,0 +1,720 @@
+[
+  {
+    "raceId": "TDL MK_25",
+    "athleteId": "MK_00",
+    "ftp": 215,
+    "wPrimeBase": 21700,
+    "wPrimeBaseTier": "Tier 0 (explicit)",
+    "wPrimeOver": 21700,
+    "plan": {
+      "flatIF": 0.784,
+      "np": 186,
+      "avgPower": 167,
+      "ifActual": 0.87,
+      "tss": 228,
+      "durationMin": 181,
+      "surgeApplied": 2,
+      "surgeDetails": [
+        {
+          "climbId": 1,
+          "category": "moderate",
+          "startDistKm": 1.9,
+          "lengthKm": 1.9,
+          "peakGradePct": 6.8,
+          "predictedDurationSec": 343,
+          "baseCapMult": 1.074,
+          "surge": 0,
+          "capMult": 1.074,
+          "capW": 231
+        },
+        {
+          "climbId": 2,
+          "category": "moderate",
+          "startDistKm": 16.6,
+          "lengthKm": 0.5,
+          "peakGradePct": 3.6,
+          "predictedDurationSec": 83,
+          "baseCapMult": 1.074,
+          "surge": 0,
+          "capMult": 1.074,
+          "capW": 231
+        },
+        {
+          "climbId": 3,
+          "category": "moderate",
+          "startDistKm": 21.4,
+          "lengthKm": 0.5,
+          "peakGradePct": 4.2,
+          "predictedDurationSec": 89,
+          "baseCapMult": 1.074,
+          "surge": 0.084,
+          "capMult": 1.074,
+          "capW": 231
+        },
+        {
+          "climbId": 4,
+          "category": "moderate",
+          "startDistKm": 31.7,
+          "lengthKm": 0.5,
+          "peakGradePct": 3.9,
+          "predictedDurationSec": 84,
+          "baseCapMult": 1.074,
+          "surge": 0,
+          "capMult": 1.074,
+          "capW": 231
+        },
+        {
+          "climbId": 5,
+          "category": "moderate",
+          "startDistKm": 38.5,
+          "lengthKm": 0.5,
+          "peakGradePct": 4.2,
+          "predictedDurationSec": 92,
+          "baseCapMult": 1.074,
+          "surge": 0.082,
+          "capMult": 1.074,
+          "capW": 231
+        },
+        {
+          "climbId": 6,
+          "category": "moderate",
+          "startDistKm": 40.5,
+          "lengthKm": 0.5,
+          "peakGradePct": 3,
+          "predictedDurationSec": 72,
+          "baseCapMult": 1.074,
+          "surge": 0,
+          "capMult": 1.074,
+          "capW": 231
+        },
+        {
+          "climbId": 7,
+          "category": "moderate",
+          "startDistKm": 43.9,
+          "lengthKm": 0.5,
+          "peakGradePct": 4.8,
+          "predictedDurationSec": 97,
+          "baseCapMult": 1.074,
+          "surge": 0.318,
+          "capMult": 1.209,
+          "capW": 260
+        },
+        {
+          "climbId": 8,
+          "category": "moderate",
+          "startDistKm": 48.7,
+          "lengthKm": 0.5,
+          "peakGradePct": 4.5,
+          "predictedDurationSec": 93,
+          "baseCapMult": 1.074,
+          "surge": 0.204,
+          "capMult": 1.152,
+          "capW": 248
+        }
+      ]
+    },
+    "baseline": {
+      "predMinPct": 39.4,
+      "actMinPct": 8.5,
+      "planBins": [
+        80,
+        73,
+        92,
+        78,
+        78,
+        85,
+        95,
+        90,
+        51,
+        79
+      ],
+      "actBins": [
+        43,
+        29,
+        43,
+        52,
+        72,
+        76,
+        83,
+        63,
+        92,
+        92
+      ]
+    },
+    "post": {
+      "predMinPct": 55,
+      "actMinPct": 32,
+      "gapPp": -23,
+      "peakBurnPredJ": 365,
+      "trajectory": [
+        {
+          "binPct": 10,
+          "predPct": 88,
+          "actPct": 58
+        },
+        {
+          "binPct": 20,
+          "predPct": 81,
+          "actPct": 47
+        },
+        {
+          "binPct": 30,
+          "predPct": 94,
+          "actPct": 58
+        },
+        {
+          "binPct": 40,
+          "predPct": 84,
+          "actPct": 64
+        },
+        {
+          "binPct": 50,
+          "predPct": 77,
+          "actPct": 79
+        },
+        {
+          "binPct": 60,
+          "predPct": 86,
+          "actPct": 82
+        },
+        {
+          "binPct": 70,
+          "predPct": 95,
+          "actPct": 87
+        },
+        {
+          "binPct": 80,
+          "predPct": 93,
+          "actPct": 73
+        },
+        {
+          "binPct": 90,
+          "predPct": 64,
+          "actPct": 94
+        },
+        {
+          "binPct": 100,
+          "predPct": 85,
+          "actPct": 94
+        }
+      ]
+    },
+    "isolationNoSurge": {
+      "predMinPct": 55,
+      "actMinPct": 32,
+      "gapPp": -23
+    },
+    "phenotypeOverride": {
+      "wPrime": 21700,
+      "predMinPct": 55,
+      "actMinPct": 32,
+      "gapPp": -23,
+      "trajectory": [
+        {
+          "binPct": 10,
+          "predPct": 88,
+          "actPct": 58
+        },
+        {
+          "binPct": 20,
+          "predPct": 81,
+          "actPct": 47
+        },
+        {
+          "binPct": 30,
+          "predPct": 94,
+          "actPct": 58
+        },
+        {
+          "binPct": 40,
+          "predPct": 84,
+          "actPct": 64
+        },
+        {
+          "binPct": 50,
+          "predPct": 77,
+          "actPct": 79
+        },
+        {
+          "binPct": 60,
+          "predPct": 86,
+          "actPct": 82
+        },
+        {
+          "binPct": 70,
+          "predPct": 95,
+          "actPct": 87
+        },
+        {
+          "binPct": 80,
+          "predPct": 93,
+          "actPct": 73
+        },
+        {
+          "binPct": 90,
+          "predPct": 64,
+          "actPct": 94
+        },
+        {
+          "binPct": 100,
+          "predPct": 85,
+          "actPct": 94
+        }
+      ]
+    },
+    "perClimb": [
+      {
+        "climbId": 1,
+        "startDistKm": 1.9,
+        "lengthKm": 1.9,
+        "peakGradePct": 6.8,
+        "category": "moderate",
+        "predWbalPct": 71.5,
+        "actWbalPct": 43
+      },
+      {
+        "climbId": 2,
+        "startDistKm": 16.6,
+        "lengthKm": 0.5,
+        "peakGradePct": 3.6,
+        "category": "moderate",
+        "predWbalPct": 84.3,
+        "actWbalPct": 43.3
+      },
+      {
+        "climbId": 3,
+        "startDistKm": 21.4,
+        "lengthKm": 0.5,
+        "peakGradePct": 4.2,
+        "category": "moderate",
+        "predWbalPct": 79.1,
+        "actWbalPct": 49.4
+      },
+      {
+        "climbId": 4,
+        "startDistKm": 31.7,
+        "lengthKm": 0.5,
+        "peakGradePct": 3.9,
+        "category": "moderate",
+        "predWbalPct": 75.9,
+        "actWbalPct": 52.3
+      },
+      {
+        "climbId": 5,
+        "startDistKm": 38.5,
+        "lengthKm": 0.5,
+        "peakGradePct": 4.2,
+        "category": "moderate",
+        "predWbalPct": 83.6,
+        "actWbalPct": 64.1
+      },
+      {
+        "climbId": 6,
+        "startDistKm": 40.5,
+        "lengthKm": 0.5,
+        "peakGradePct": 3,
+        "category": "moderate",
+        "predWbalPct": 84,
+        "actWbalPct": 69.7
+      },
+      {
+        "climbId": 7,
+        "startDistKm": 43.9,
+        "lengthKm": 0.5,
+        "peakGradePct": 4.8,
+        "category": "moderate",
+        "predWbalPct": 62.8,
+        "actWbalPct": 72.8
+      },
+      {
+        "climbId": 8,
+        "startDistKm": 48.7,
+        "lengthKm": 0.5,
+        "peakGradePct": 4.5,
+        "category": "moderate",
+        "predWbalPct": 64.9,
+        "actWbalPct": 63.2
+      }
+    ]
+  },
+  {
+    "raceId": "CCRIDE_MK_26",
+    "athleteId": "MK_01",
+    "ftp": 200,
+    "wPrimeBase": 15000,
+    "wPrimeBaseTier": "Tier 0 (explicit)",
+    "wPrimeOver": 22000,
+    "plan": {
+      "flatIF": 0.717,
+      "np": 152,
+      "avgPower": 143,
+      "ifActual": 0.76,
+      "tss": 123,
+      "durationMin": 128,
+      "surgeApplied": 0,
+      "surgeDetails": []
+    },
+    "baseline": {
+      "predMinPct": 91.8,
+      "actMinPct": 3.2,
+      "planBins": [
+        100,
+        97,
+        96,
+        95,
+        97,
+        96,
+        96,
+        94,
+        98,
+        99
+      ],
+      "actBins": [
+        74,
+        72,
+        52,
+        68,
+        35,
+        44,
+        54,
+        35,
+        14,
+        18
+      ]
+    },
+    "post": {
+      "predMinPct": 91.8,
+      "actMinPct": 3.2,
+      "gapPp": -88.6,
+      "peakBurnPredJ": 347,
+      "trajectory": [
+        {
+          "binPct": 10,
+          "predPct": 100,
+          "actPct": 74
+        },
+        {
+          "binPct": 20,
+          "predPct": 97,
+          "actPct": 72
+        },
+        {
+          "binPct": 30,
+          "predPct": 96,
+          "actPct": 52
+        },
+        {
+          "binPct": 40,
+          "predPct": 95,
+          "actPct": 68
+        },
+        {
+          "binPct": 50,
+          "predPct": 97,
+          "actPct": 35
+        },
+        {
+          "binPct": 60,
+          "predPct": 96,
+          "actPct": 44
+        },
+        {
+          "binPct": 70,
+          "predPct": 96,
+          "actPct": 54
+        },
+        {
+          "binPct": 80,
+          "predPct": 94,
+          "actPct": 35
+        },
+        {
+          "binPct": 90,
+          "predPct": 98,
+          "actPct": 14
+        },
+        {
+          "binPct": 100,
+          "predPct": 99,
+          "actPct": 18
+        }
+      ]
+    },
+    "isolationNoSurge": {
+      "predMinPct": 91.8,
+      "actMinPct": 3.2,
+      "gapPp": -88.6
+    },
+    "phenotypeOverride": {
+      "wPrime": 22000,
+      "predMinPct": 94.4,
+      "actMinPct": 34,
+      "gapPp": -60.4,
+      "trajectory": [
+        {
+          "binPct": 10,
+          "predPct": 100,
+          "actPct": 82
+        },
+        {
+          "binPct": 20,
+          "predPct": 98,
+          "actPct": 81
+        },
+        {
+          "binPct": 30,
+          "predPct": 97,
+          "actPct": 67
+        },
+        {
+          "binPct": 40,
+          "predPct": 96,
+          "actPct": 78
+        },
+        {
+          "binPct": 50,
+          "predPct": 98,
+          "actPct": 55
+        },
+        {
+          "binPct": 60,
+          "predPct": 97,
+          "actPct": 62
+        },
+        {
+          "binPct": 70,
+          "predPct": 97,
+          "actPct": 69
+        },
+        {
+          "binPct": 80,
+          "predPct": 96,
+          "actPct": 56
+        },
+        {
+          "binPct": 90,
+          "predPct": 99,
+          "actPct": 41
+        },
+        {
+          "binPct": 100,
+          "predPct": 100,
+          "actPct": 44
+        }
+      ]
+    },
+    "perClimb": []
+  },
+  {
+    "raceId": "PPRIDE_MK_26",
+    "athleteId": "MK_01",
+    "ftp": 200,
+    "wPrimeBase": 15000,
+    "wPrimeBaseTier": "Tier 0 (explicit)",
+    "wPrimeOver": 22000,
+    "plan": {
+      "flatIF": 0.829,
+      "np": 173,
+      "avgPower": 159,
+      "ifActual": 0.87,
+      "tss": 146,
+      "durationMin": 115,
+      "surgeApplied": 2,
+      "surgeDetails": [
+        {
+          "climbId": 1,
+          "category": "moderate",
+          "startDistKm": 23.4,
+          "lengthKm": 0.3,
+          "peakGradePct": 5.1,
+          "predictedDurationSec": 70,
+          "baseCapMult": 1.05,
+          "surge": 0.519,
+          "capMult": 1.31,
+          "capW": 262
+        },
+        {
+          "climbId": 2,
+          "category": "steep",
+          "startDistKm": 40.6,
+          "lengthKm": 0.3,
+          "peakGradePct": 6.1,
+          "predictedDurationSec": 72,
+          "baseCapMult": 1.15,
+          "surge": 0.933,
+          "capMult": 1.517,
+          "capW": 303
+        }
+      ]
+    },
+    "baseline": {
+      "predMinPct": 74.1,
+      "actMinPct": 0,
+      "planBins": [
+        98,
+        90,
+        89,
+        92,
+        79,
+        86,
+        89,
+        78,
+        86,
+        80
+      ],
+      "actBins": [
+        13,
+        2,
+        23,
+        56,
+        8,
+        14,
+        36,
+        12,
+        3,
+        22
+      ]
+    },
+    "post": {
+      "predMinPct": 46.2,
+      "actMinPct": 0,
+      "gapPp": -46.2,
+      "peakBurnPredJ": 420,
+      "trajectory": [
+        {
+          "binPct": 10,
+          "predPct": 98,
+          "actPct": 13
+        },
+        {
+          "binPct": 20,
+          "predPct": 90,
+          "actPct": 2
+        },
+        {
+          "binPct": 30,
+          "predPct": 89,
+          "actPct": 23
+        },
+        {
+          "binPct": 40,
+          "predPct": 92,
+          "actPct": 56
+        },
+        {
+          "binPct": 50,
+          "predPct": 63,
+          "actPct": 8
+        },
+        {
+          "binPct": 60,
+          "predPct": 80,
+          "actPct": 14
+        },
+        {
+          "binPct": 70,
+          "predPct": 87,
+          "actPct": 36
+        },
+        {
+          "binPct": 80,
+          "predPct": 55,
+          "actPct": 12
+        },
+        {
+          "binPct": 90,
+          "predPct": 77,
+          "actPct": 3
+        },
+        {
+          "binPct": 100,
+          "predPct": 75,
+          "actPct": 22
+        }
+      ]
+    },
+    "isolationNoSurge": {
+      "predMinPct": 74.1,
+      "actMinPct": 0,
+      "gapPp": -74.1
+    },
+    "phenotypeOverride": {
+      "wPrime": 22000,
+      "predMinPct": 63.3,
+      "actMinPct": 7.4,
+      "gapPp": -55.9,
+      "trajectory": [
+        {
+          "binPct": 10,
+          "predPct": 99,
+          "actPct": 41
+        },
+        {
+          "binPct": 20,
+          "predPct": 93,
+          "actPct": 27
+        },
+        {
+          "binPct": 30,
+          "predPct": 93,
+          "actPct": 43
+        },
+        {
+          "binPct": 40,
+          "predPct": 95,
+          "actPct": 69
+        },
+        {
+          "binPct": 50,
+          "predPct": 75,
+          "actPct": 37
+        },
+        {
+          "binPct": 60,
+          "predPct": 86,
+          "actPct": 41
+        },
+        {
+          "binPct": 70,
+          "predPct": 91,
+          "actPct": 56
+        },
+        {
+          "binPct": 80,
+          "predPct": 69,
+          "actPct": 31
+        },
+        {
+          "binPct": 90,
+          "predPct": 85,
+          "actPct": 26
+        },
+        {
+          "binPct": 100,
+          "predPct": 83,
+          "actPct": 33
+        }
+      ]
+    },
+    "perClimb": [
+      {
+        "climbId": 1,
+        "startDistKm": 23.4,
+        "lengthKm": 0.3,
+        "peakGradePct": 5.1,
+        "category": "moderate",
+        "predWbalPct": 66.2,
+        "actWbalPct": 6.5
+      },
+      {
+        "climbId": 2,
+        "startDistKm": 40.6,
+        "lengthKm": 0.3,
+        "peakGradePct": 6.1,
+        "category": "steep",
+        "predWbalPct": 50.3,
+        "actWbalPct": 0
+      }
+    ]
+  }
+]

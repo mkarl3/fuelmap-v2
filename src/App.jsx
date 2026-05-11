@@ -7,7 +7,7 @@ import {
   gradeCategory, carbOxidationRate, recommendIntakeRate, computeZoneDist,
   computeVI, estimateDuration, computeCP, deriveWPrime, getSegmentIF,
   buildWbal, buildWbalFromRawSeries, buildPerClimbStats, detectClimbs,
-  buildPowerStream, flatIFForTargetNP,
+  buildPowerStream, buildPowerStreamWithSurge, flatIFForTargetNP,
   alignFitToGpx,
   fitWarn,
   computeNP,
@@ -1807,7 +1807,11 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           strat = { mode: "constant_if", targetIF: 0.76 };
         }
       }
-      const result = buildPowerStream(effectiveStats, athlete, strat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg, capsForPlan);
+      // B-23: final plan uses two-pass surge factor on detected climbs.
+      // Search loops (flatIFForTargetNP, goal-time search, requiredIF preview)
+      // still use static-cap buildPowerStream — converged IF then feeds the
+      // surge-adjusted final pass. Routes with no detected climbs skip pass 2.
+      const result = buildPowerStreamWithSurge(effectiveStats, athlete, strat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg, capsForPlan);
       // Group C: buildPowerStream may return a structured error if the climb-
       // cap auto-restore couldn't run (FTP missing). Surface to the user.
       if (result && typeof result === 'object' && result.ok === false) {
@@ -2417,8 +2421,11 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
 
           return (
             <div style={{ marginTop: 10 }}>
-              <div style={{ fontSize: 11, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>
-                Climb Strategy
+              <div style={{ fontSize: 11, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>
+                Sustained Climb Strategy
+              </div>
+              <div style={{ fontSize: 10, color: T.textDim, marginBottom: 8, lineHeight: 1.4 }}>
+                Power limits for short, steep climbs may briefly exceed these caps to account for surging
               </div>
               {!gpxStats && (
                 <div style={{ fontSize: 11, color: T.textDim, padding: "8px 12px", background: T.surface2, borderRadius: 4 }}>

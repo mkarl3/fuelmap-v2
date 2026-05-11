@@ -40,6 +40,9 @@ export { buildWbalFromRawSeries }          from './helpers/buildWbalFromRawSerie
 export { buildPerClimbStats }              from './helpers/buildPerClimbStats.js';
 export { detectClimbs }                    from './helpers/detectClimbs.js';
 export { buildPowerStream }                from './helpers/buildPowerStream.js';
+export { buildPowerStreamWithSurge }       from './helpers/buildPowerStreamWithSurge.js';
+export { surgeAdjustedCapMult,
+         SURGE_FACTOR_DEFAULTS }           from './helpers/surgeFactor.js';
 export { flatIFForTargetNP }               from './helpers/flatIFForTargetNP.js';
 export { fitWarn,
          enableFitWarnBuffer,
