@@ -144,6 +144,11 @@ export function buildPowerStream(
   windSpeedMs = 0,
   windDirDeg  = 270,
   climbCategories = null,
+  perClimbSurgeCaps = null,   // B-23: optional per-climb cap overrides.
+                              // Array of { startM, endM, capW }. When present
+                              // and a per-second block's distance falls within
+                              // a range, that climb's surge cap replaces the
+                              // category cap. Null = static caps only (legacy).
 ) {
   // Prompt 4B precondition (replaces the legacy FTP×2 fallback ceiling).
   // Caller must always pass climbCategories — App.jsx auto-restores defaults
@@ -232,7 +237,19 @@ export function buildPowerStream(
       if (!catSettings || !(catSettings.max > 0)) {
         return { ok: false, reason: 'climb_cap_unset', detail: { category: cat, gradePct } };
       }
-      secCeiling = Math.min(secCeiling, catSettings.max);
+      // B-23: if this second's distance falls inside a detected climb with a
+      // surge-adjusted cap, that cap replaces the category cap. The orchestrator
+      // (buildPowerStreamWithSurge) computes surge caps to be ≥ baseCapMult
+      // (FLOOR_AT_BASE_CAP), so this never reduces a category's effective cap.
+      let surgeCapW = null;
+      if (perClimbSurgeCaps) {
+        for (let i = 0; i < perClimbSurgeCaps.length; i++) {
+          const c = perClimbSurgeCaps[i];
+          if (s >= c.startM && s < c.endM) { surgeCapW = c.capW; break; }
+        }
+      }
+      const ceilingW = surgeCapW != null ? surgeCapW : catSettings.max;
+      secCeiling = Math.min(secCeiling, ceilingW);
       if (catSettings.min > 0) secFloor = catSettings.min;
     }
 
