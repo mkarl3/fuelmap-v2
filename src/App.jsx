@@ -207,11 +207,18 @@ function startingGlycogen(weightKg) { return Math.round(weightKg * 5.5); }
 // map to scaling factors on the weight-based glycogen baseline (`weight × 5.5g`).
 // Calibrated to span the existing 0.70–1.15 model range; "carb-loaded" sits at
 // 1.10 (below the 1.15 cap) so it's never literally saturating.
+// `mealCarbsPerKg` — grams of carbs per kg body weight in the pre-race meal.
+// Anchored to ACSM/ISSN guidance of 1–4 g/kg in the 4 hours pre-exercise.
+// Carb-loaded picks 1.8 g/kg (slightly above Full meal) — the multi-day loading
+// effect is in `glycogenScale`, but the race-morning meal is typically a touch
+// larger on a properly-loaded day. At 80kg these give 0 / 40 / 120 / 144 g —
+// within the descriptive ranges in `helper`. Scales naturally for lighter/heavier
+// riders.
 const PRE_RACE_FUELING = [
-  { id: "fasted",      label: "Fasted",      helper: "No meal in 4+ hours",                 glycogenScale: 0.70 },
-  { id: "light_meal",  label: "Light meal",  helper: "~30–60g carbs (banana, half bagel)",  glycogenScale: 0.82 },
-  { id: "full_meal",   label: "Full meal",   helper: "~80–150g carbs (full breakfast)",     glycogenScale: 0.92 },
-  { id: "carb_loaded", label: "Carb-loaded", helper: "Multi-day loading + race-day meal",   glycogenScale: 1.10 },
+  { id: "fasted",      label: "Fasted",      helper: "No meal in 4+ hours",                 glycogenScale: 0.70, mealCarbsPerKg: 0.0 },
+  { id: "light_meal",  label: "Light meal",  helper: "~30–60g carbs (banana, half bagel)",  glycogenScale: 0.82, mealCarbsPerKg: 0.5 },
+  { id: "full_meal",   label: "Full meal",   helper: "~80–150g carbs (full breakfast)",     glycogenScale: 0.92, mealCarbsPerKg: 1.5 },
+  { id: "carb_loaded", label: "Carb-loaded", helper: "Multi-day loading + race-day meal",   glycogenScale: 1.10, mealCarbsPerKg: 1.8 },
 ];
 const PRE_RACE_FUELING_DEFAULT_ID = "light_meal";
 
@@ -220,6 +227,18 @@ function fuelingScale(id) {
   if (preset) return preset.glycogenScale;
   // Unknown id (corrupt save, future-version downgrade) → default.
   return PRE_RACE_FUELING.find(p => p.id === PRE_RACE_FUELING_DEFAULT_ID).glycogenScale;
+}
+
+// Pre-race meal carbs in grams (weight-scaled) — used to offset the BurnRateChart's
+// cumulative intake line so it starts from the pre-race buffer rather than 0.
+// Glycogen scale and meal grams are two facets of the same preset: glycogenScale
+// drives starting muscle/liver glycogen reserve (long-duration); meal grams
+// drive the absorbed carbs available in circulation at race start (short-duration
+// buffer). Per ACSM/ISSN guidance, both scale with athlete body weight.
+function fuelingMealCarbsG(id, weightKg) {
+  const preset = PRE_RACE_FUELING.find(p => p.id === id)
+    ?? PRE_RACE_FUELING.find(p => p.id === PRE_RACE_FUELING_DEFAULT_ID);
+  return Math.round((weightKg || 0) * preset.mealCarbsPerKg);
 }
 
 // 4C sub-step 1: fully parameterized on `blockMinutes` so the function works
@@ -950,43 +969,58 @@ function ElevPowerChart({ powerStream, gpxStats, ftp, imperial = false, detected
 }
 
 // ─── BURN RATE CHART ──────────────────────────────────────────────────────────
-function BurnRateChart({ overlayData, durationMin, blockMin = 5, estimatedDurationMin }) {
+function BurnRateChart({ overlayData, durationMin, blockMin = 5, estimatedDurationMin, preRaceMealG = 0, maxIntakeGPerHr = Infinity }) {
   if (!overlayData || overlayData.length === 0) return null;
 
   const rawDuration = estimatedDurationMin ?? (overlayData[overlayData.length - 1]?.time ?? 1);
   const totalDurationMin = durationMin ?? rawDuration;
   const viScale = rawDuration > 0 ? totalDurationMin / rawDuration : 1;
 
-  // Duration-based intake targets (sports nutrition research)
+  // Duration-based intake targets (sports nutrition research). Upper bound
+  // capped at the athlete's personal max intake (gut absorption ceiling) so
+  // the chart never recommends a rate the rider can't physically sustain.
+  // If max < research floor (untrained gut), the zone collapses to a single
+  // line at the athlete's cap — honest about the limitation.
   const getTargetBounds = (dur) => {
     if (dur < 60)  return { low: 0,  high: 20 };
     if (dur < 90)  return { low: 30, high: 60 };
     if (dur < 120) return { low: 45, high: 60 };
     return             { low: 60, high: 90 };
   };
-  const { low: TARGET_LOW, high: TARGET_HIGH } = getTargetBounds(totalDurationMin || 240);
+  const raw = getTargetBounds(totalDurationMin || 240);
+  const TARGET_LOW  = Math.min(raw.low,  maxIntakeGPerHr);
+  const TARGET_HIGH = Math.min(raw.high, maxIntakeGPerHr);
 
-  // Build cumulative burn and intake from the overlay data
-  let cumBurn = 0, cumIntake = 0;
+  // Build cumulative burn and intake. `cumIntake` starts at `preRaceMealG` —
+  // pre-race meal carbs are absorbed before race start and contribute to the
+  // rider's fuel buffer. Target zone is offset by the same `preRaceMealG` so
+  // the comparison "am I keeping up with the recommended in-race rate?" stays
+  // meaningful — both lines start from the rider's actual pre-race position
+  // and the rate-of-rise comparison is what matters. `elapsed` uses the
+  // VI-corrected display time so the target zone aligns with the X-axis ticks
+  // the user sees.
+  let cumBurn = 0, cumIntake = preRaceMealG;
   const data = overlayData.map(pt => {
     cumBurn += pt.burnRate * (blockMin / 60);
     cumIntake += pt.actualAbsorbed;
-    const elapsed = pt.time / 60; // hours elapsed (raw — used for target rate calc)
+    const elapsedDisplay = (pt.time * viScale) / 60; // hours, aligned with X-axis
     return {
       ...pt,
       time: Math.round(pt.time * viScale),
       cumBurn: Math.round(cumBurn),
       cumIntake: Math.round(cumIntake),
       deficit: Math.round(cumBurn - cumIntake),
-      targetLow:  elapsed > 0 ? Math.round(TARGET_LOW  * elapsed) : 0,
-      targetHigh: elapsed > 0 ? Math.round(TARGET_HIGH * elapsed) : 0,
+      targetLow:  preRaceMealG + Math.round(TARGET_LOW  * elapsedDisplay),
+      targetHigh: preRaceMealG + Math.round(TARGET_HIGH * elapsedDisplay),
     };
   });
 
-  const maxVal = Math.max(...data.map(d => d.cumBurn)) * 1.1;
+  // Include intake, target zone, and burn in the Y domain so nothing clips
+  // when burn is small early in the ride or when pre-race buffer is large.
+  const maxVal = Math.max(...data.map(d => Math.max(d.cumBurn, d.cumIntake, d.targetHigh))) * 1.1;
 
   return (
-    <div style={{ height: 180, marginTop: 8 }}>
+    <div style={{ height: 220, marginTop: 8 }}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
           <defs>
@@ -1029,10 +1063,9 @@ function BurnRateChart({ overlayData, durationMin, blockMin = 5, estimatedDurati
           <Area type="monotone" dataKey="cumBurn" stroke="none" fill="url(#deficitGrad)" dot={false} legendType="none" activeDot={false} />
           <Line type="monotone" dataKey="cumBurn" stroke={T.gold} strokeWidth={2.5} dot={false} name="Cumulative Burn" />
           <Line type="monotone" dataKey="cumIntake" stroke={T.blue} strokeWidth={2.5} dot={false} name="Cumulative Absorbed" />
-          {/* Intake event markers */}
+          {/* Intake event markers — dashed lines only; intake amount in tooltip */}
           {overlayData.filter(pt => pt.intake > 0).map((pt, i) => (
-            <ReferenceLine key={i} x={pt.time} stroke={`${T.blue}80`} strokeDasharray="3 3"
-              label={{ value: `+${pt.intake}g`, fill: T.blue, fontSize: 9, position: "top" }} />
+            <ReferenceLine key={i} x={pt.time} stroke={`${T.blue}60`} strokeDasharray="3 3" />
           ))}
         </ComposedChart>
       </ResponsiveContainer>
@@ -1072,7 +1105,7 @@ function GlycogenChart({ overlayData, athlete, durationMin, estimatedDurationMin
   const data = overlayData.map(pt => ({ ...pt, time: Math.round(pt.time * viScale) }));
 
   return (
-    <div style={{ height: 160, marginTop: 8 }}>
+    <div style={{ height: 200, marginTop: 8 }}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
           <CartesianGrid strokeDasharray="2 4" stroke={T.border} />
@@ -1211,13 +1244,13 @@ function WbalChart({ wbalData, athlete, gpxStats = null, imperial = false, durat
 function IntakeRow({ event, onRemove, products }) {
   const prod = products.find(p => p.id === event.productId);
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: T.surface2, borderRadius: 4, marginBottom: 6 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: T.surface2, borderRadius: 4 }}>
       <span style={{ color: T.textMuted, fontSize: 11, fontFamily: "Barlow Condensed", minWidth: 36 }}>
         {minsToHHMM(event.time)}
       </span>
-      <span style={{ flex: 1, fontSize: 13 }}>{event.name}</span>
+      <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.name}</span>
       <span style={{ color: T.gold, fontSize: 12, fontFamily: "Barlow Condensed" }}>{event.carbs}g</span>
-      <button onClick={onRemove} style={{ background: "none", border: "none", color: T.textDim, fontSize: 14, padding: "0 4px" }}>×</button>
+      <button onClick={onRemove} style={{ background: "none", border: "none", color: T.textDim, fontSize: 14, padding: "0 4px", cursor: "pointer" }}>×</button>
     </div>
   );
 }
@@ -1234,15 +1267,42 @@ function IntakeForm({ products, onAdd, maxTime }) {
   };
 
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
-      <select value={selProd} onChange={e => setSelProd(Number(e.target.value))} style={{ flex: 2, minWidth: 140 }}>
-        {products.map(p => <option key={p.id} value={p.id}>{p.name} ({p.carbs}g)</option>)}
-      </select>
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <label style={{ fontSize: 11, color: T.textMuted, whiteSpace: "nowrap" }}>@ min</label>
-        <input type="number" value={timeMin} onChange={e => setTimeMin(Number(e.target.value))} min={0} max={maxTime} style={{ width: 60 }} />
+    <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 4, padding: "10px 12px", marginBottom: 12 }}>
+      <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>
+        Add Fuel Event
       </div>
-      <button className="btn-secondary" onClick={handleAdd}>+ Add</button>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select value={selProd} onChange={e => setSelProd(Number(e.target.value))} style={{ flex: 2, minWidth: 140 }}>
+          {products.map(p => (
+            <option key={p.id} value={p.id}>
+              {p.name} ({p.carbs}g / {p.sodium || 0}mg)
+            </option>
+          ))}
+        </select>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <label style={{ fontSize: 11, color: T.textMuted, whiteSpace: "nowrap" }}>@ min</label>
+          <input type="number" value={timeMin} onChange={e => setTimeMin(Number(e.target.value))} min={0} max={maxTime} style={{ width: 60 }} />
+        </div>
+        <button className="btn-primary" onClick={handleAdd}>+ Add</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── INTAKE LIST (2-column grid with empty state) ─────────────────────────────
+function IntakeList({ events, products, onRemove }) {
+  if (events.length === 0) {
+    return (
+      <div style={{ fontSize: 12, color: T.textDim, padding: "12px 10px", textAlign: "center", background: T.surface2, borderRadius: 4, marginBottom: 12 }}>
+        No fuel events yet — use the form above to add one.
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, marginBottom: 12 }}>
+      {events.map(e => (
+        <IntakeRow key={e.id} event={e} products={products} onRemove={() => onRemove(e.id)} />
+      ))}
     </div>
   );
 }
@@ -2761,15 +2821,14 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             </div>
           </div>
 
+          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8 }}>In-Race Fueling</div>
           <IntakeForm products={products} onAdd={e => setIntakeEvents(prev => [...prev, e].sort((a, b) => a.time - b.time))} maxTime={pacingPlan.estimatedDurationMin} />
-          {intakeEvents.map(e => (
-            <IntakeRow key={e.id} event={e} products={products} onRemove={() => setIntakeEvents(prev => prev.filter(x => x.id !== e.id))} />
-          ))}
+          <IntakeList events={intakeEvents} products={products} onRemove={id => setIntakeEvents(prev => prev.filter(x => x.id !== id))} />
 
           {overlayData.length > 0 && (
             <>
               <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Cumulative Burn vs Intake</div>
-              <BurnRateChart overlayData={overlayData} durationMin={pacingPlan?.correctedDurationMin} blockMin={2} estimatedDurationMin={pacingPlan?.estimatedDurationMin} />
+              <BurnRateChart overlayData={overlayData} durationMin={pacingPlan?.correctedDurationMin} blockMin={2} estimatedDurationMin={pacingPlan?.estimatedDurationMin} preRaceMealG={fuelingMealCarbsG(preRaceFueling, athlete.weight)} maxIntakeGPerHr={athlete.maxCarbIntakeGPerHr ?? 90} />
               <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Glycogen Reserve</div>
               <GlycogenChart overlayData={overlayData} athlete={athlete} durationMin={pacingPlan.correctedDurationMin} estimatedDurationMin={pacingPlan.estimatedDurationMin} />
               <div style={{ marginTop: 12, padding: "10px 14px", background: T.surface2, borderRadius: 4, fontSize: 12 }}>
@@ -4960,14 +5019,13 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               })}
             </div>
           </div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8 }}>In-Race Fueling</div>
           <IntakeForm products={products} onAdd={e => setActualIntake(prev => [...prev, e].sort((a, b) => a.time - b.time))} maxTime={fitData?.durationMin || 360} />
-          {actualIntake.map(e => (
-            <IntakeRow key={e.id} event={e} products={products} onRemove={() => setActualIntake(prev => prev.filter(x => x.id !== e.id))} />
-          ))}
+          <IntakeList events={actualIntake} products={products} onRemove={id => setActualIntake(prev => prev.filter(x => x.id !== id))} />
           {fitOverlay.length > 0 && (
             <>
               <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Cumulative Burn vs Intake</div>
-              <BurnRateChart overlayData={fitOverlay} durationMin={fitData?.durationMin} />
+              <BurnRateChart overlayData={fitOverlay} durationMin={fitData?.durationMin} preRaceMealG={fuelingMealCarbsG(analyzePreRaceFueling, athlete.weight)} maxIntakeGPerHr={athlete.maxCarbIntakeGPerHr ?? 90} />
               <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Glycogen Reserve</div>
               <GlycogenChart overlayData={fitOverlay} athlete={athlete} />
 
