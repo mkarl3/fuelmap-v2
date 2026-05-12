@@ -1484,6 +1484,70 @@ function BikeModal({ bike, onSave, onClose, imperial }) {
   );
 }
 
+function ProductModal({ product, onSave, onClose }) {
+  const [form, setForm] = useState({
+    name: product?.name ?? "",
+    carbs: product?.carbs ?? 0,
+    sodium: product?.sodium ?? 0,
+    isLiquid: product?.isLiquid ?? false,
+  });
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const canSave = !!form.name;
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: 24, width: 380 }}>
+        <div className="card-header" style={{ marginBottom: 16 }}>{product?.id ? "Edit Product" : "New Product"}</div>
+
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Name</label>
+          <input type="text" value={form.name} onChange={e => set("name", e.target.value)} style={{ width: "100%" }} />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Carbs (g)</label>
+            <input type="number" min={0} value={form.carbs || ""} onChange={e => set("carbs", Number(e.target.value))} style={{ width: "100%" }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Sodium (mg)</label>
+            <input type="number" min={0} value={form.sodium || ""} onChange={e => set("sodium", Number(e.target.value))} style={{ width: "100%" }} />
+          </div>
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <button type="button" onClick={() => set("isLiquid", !form.isLiquid)}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 8,
+              background: "none", border: "none", padding: 0, cursor: "pointer",
+            }}>
+            <span style={{
+              width: 32, height: 18, borderRadius: 9, flexShrink: 0,
+              background: form.isLiquid ? T.blue : T.border,
+              position: "relative", transition: "background 0.15s",
+            }}>
+              <span style={{
+                position: "absolute", top: 2, left: form.isLiquid ? 16 : 2,
+                width: 14, height: 14, borderRadius: "50%",
+                background: T.surface, transition: "left 0.15s",
+              }} />
+            </span>
+            <span style={{
+              fontSize: 12, color: form.isLiquid ? T.blue : T.textMuted,
+              fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
+            }}>Liquid</span>
+          </button>
+          <div style={{ fontSize: 10, color: T.textDim, marginTop: 6 }}>
+            Liquids absorb over ~60 min (sipped); solids over ~20 min.
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" disabled={!canSave} style={{ opacity: canSave ? 1 : 0.4, cursor: canSave ? "pointer" : "not-allowed" }} onClick={() => { if (canSave) { onSave(form); onClose(); } }}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AthleteModal({ athlete, onSave, onClose, imperial }) {
   const blankTests = [{ secs: 0, watts: 0 }, { secs: 0, watts: 0 }, { secs: 0, watts: 0 }];
   const [form, setForm] = useState({
@@ -5348,29 +5412,19 @@ function BikesTab({ bikes, setBikes, activeBikeId, setActiveBikeId, imperial }) 
 }
 
 function LibraryTab({ products, setProducts }) {
+  // Inline Add form (always "new product"). Edits happen in ProductModal.
   const [form, setForm] = useState({ name: "", carbs: 0, sodium: 0, isLiquid: false });
-  const [editingId, setEditingId] = useState(null);
+  const [editing, setEditing] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const isEditing = editingId !== null;
 
-  const startEdit = (p) => {
-    setEditingId(p.id);
-    setForm({ name: p.name, carbs: p.carbs, sodium: p.sodium, isLiquid: p.isLiquid ?? false });
-  };
-
-  const cancelEdit = () => {
-    setEditingId(null);
+  const submitAdd = () => {
+    if (!form.name) return;
+    setProducts(prev => [...prev, { id: Date.now(), ...form }]);
     setForm({ name: "", carbs: 0, sodium: 0, isLiquid: false });
   };
 
-  const submit = () => {
-    if (!form.name) return;
-    if (isEditing) {
-      setProducts(prev => prev.map(x => x.id === editingId ? { ...x, ...form } : x));
-    } else {
-      setProducts(prev => [...prev, { id: Date.now(), ...form }]);
-    }
-    cancelEdit();
+  const saveEdit = (updates) => {
+    setProducts(prev => prev.map(x => x.id === editing.id ? { ...x, ...updates } : x));
   };
 
   const iconBtn = { background: "none", border: "none", color: T.textDim, cursor: "pointer", fontSize: 14, padding: "0 4px" };
@@ -5379,19 +5433,35 @@ function LibraryTab({ products, setProducts }) {
     <div>
       <div className="card">
         <div className="card-header">Nutrition Products</div>
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ display: "grid", gridTemplateColumns: isEditing ? "2fr 80px 80px 80px 80px" : "2fr 80px 80px 80px", gap: 8, alignItems: "center", marginBottom: 6 }}>
-            <input type="text" placeholder="Product name" value={form.name} onChange={e => set("name", e.target.value)} />
-            <input type="number" placeholder="Carbs g" value={form.carbs || ""} onChange={e => set("carbs", Number(e.target.value))} />
-            <input type="number" placeholder="Na mg" value={form.sodium || ""} onChange={e => set("sodium", Number(e.target.value))} />
-            <button className="btn-primary" onClick={submit}>{isEditing ? "Save" : "Add"}</button>
-            {isEditing && <button className="btn-secondary" onClick={cancelEdit}>Cancel</button>}
-          </div>
-          {/* B-28: liquid flag drives 60-min vs 20-min absorption window */}
-          <label style={{ fontSize: 11, color: T.textMuted, display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-            <input type="checkbox" checked={!!form.isLiquid} onChange={e => set("isLiquid", e.target.checked)} />
-            Liquid (sipped over time, ~60 min absorption)
-          </label>
+        {/* B-28 (revised): Liquid toggle is now inline in the Add row, between Sodium and Add. */}
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 80px 80px 88px 80px", gap: 8, alignItems: "center", marginBottom: 12 }}>
+          <input type="text" placeholder="Product name" value={form.name} onChange={e => set("name", e.target.value)} />
+          <input type="number" placeholder="Carbs g" value={form.carbs || ""} onChange={e => set("carbs", Number(e.target.value))} />
+          <input type="number" placeholder="Na mg" value={form.sodium || ""} onChange={e => set("sodium", Number(e.target.value))} />
+          <button type="button"
+            title={form.isLiquid ? "Liquid — absorbs over ~60 min" : "Solid — absorbs over ~20 min"}
+            onClick={() => set("isLiquid", !form.isLiquid)}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              background: "none", border: "none", padding: 0, cursor: "pointer",
+            }}>
+            <span style={{
+              width: 28, height: 16, borderRadius: 8, flexShrink: 0,
+              background: form.isLiquid ? T.blue : T.border,
+              position: "relative", transition: "background 0.15s",
+            }}>
+              <span style={{
+                position: "absolute", top: 2, left: form.isLiquid ? 14 : 2,
+                width: 12, height: 12, borderRadius: "50%",
+                background: T.surface, transition: "left 0.15s",
+              }} />
+            </span>
+            <span style={{
+              fontSize: 11, color: form.isLiquid ? T.blue : T.textMuted,
+              fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
+            }}>Liquid</span>
+          </button>
+          <button className="btn-primary" onClick={submitAdd}>Add</button>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 80px 80px 56px", gap: 0 }}>
           {[["Name", "2fr"], ["Carbs", ""], ["Na (mg)", ""], ["", ""]].map(([h]) => (
@@ -5399,20 +5469,23 @@ function LibraryTab({ products, setProducts }) {
           ))}
           {products.map(p => (
             <>
-              <div key={`n${p.id}`} style={{ padding: "8px 10px", fontSize: 13, borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>
+              <div key={`n${p.id}`} style={{ padding: "8px 10px", fontSize: 13, borderBottom: `1px solid ${T.border}` }}>
                 {p.name}
                 {p.isLiquid && <span style={{ color: T.textDim, fontSize: 11, marginLeft: 6 }}>(liquid)</span>}
               </div>
-              <div key={`c${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.gold, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>{p.carbs}g</div>
-              <div key={`s${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.textMuted, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>{p.sodium}</div>
-              <div key={`a${p.id}`} style={{ padding: "8px 4px", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 2, justifyContent: "flex-end", background: p.id === editingId ? T.surface2 : "transparent" }}>
-                <button title="Edit" onClick={() => startEdit(p)} style={iconBtn}>✎</button>
+              <div key={`c${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.gold, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}` }}>{p.carbs}g</div>
+              <div key={`s${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.textMuted, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}` }}>{p.sodium}</div>
+              <div key={`a${p.id}`} style={{ padding: "8px 4px", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 2, justifyContent: "flex-end" }}>
+                <button title="Edit" onClick={() => setEditing(p)} style={iconBtn}>✎</button>
                 <button title="Delete" onClick={() => setProducts(prev => prev.filter(x => x.id !== p.id))} style={iconBtn}>×</button>
               </div>
             </>
           ))}
         </div>
       </div>
+      {editing && (
+        <ProductModal product={editing} onSave={saveEdit} onClose={() => setEditing(null)} />
+      )}
     </div>
   );
 }
