@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ComposedChart, ReferenceLine, ReferenceArea } from "recharts";
-import { loadAllRaces, saveRace, updateRace, deleteRace } from './db.js';
+import { loadAllRaces, saveRace, updateRace, deleteRace, saveActualIntake } from './db.js';
 import { parseFIT, inferHasPower, inferHasHR } from './parsers/fitParser';
 import {
   powerAtSpeed, speedAtPower, gradeForSlice, rhoFromTemp, bikePhysics, blendedCrr,
@@ -253,29 +253,63 @@ function buildNutritionOverlay(stream, intakeEvents, athlete, glycogenScale, blo
   let glycogenReserve = Math.round(startingGlycogen(athlete.weight) * glycogenScale);
   const maxGlycogen = startingGlycogen(athlete.weight) * 1.15;
   const MAX_ABSORPTION = 90; // g/hr max intestinal absorption
-  const ABSORB_WINDOW_MIN = 20; // realistic absorption window for gels/chews/bars
+  // B-28: per-product absorption windows. Solids (gels/chews/bars/food) are
+  // consumed in seconds and fully delivered into the gut over ~20 min. Liquids
+  // (bottles/drink mixes) are sipped over time and deliver carbs over ~60 min.
+  const ABSORB_WINDOW_SOLID_MIN  = 20;
+  const ABSORB_WINDOW_LIQUID_MIN = 60;
+  // B-27: typical upper-bound gut tolerance. Carbs beyond this are physiologically
+  // rejected (GI distress / nausea / regurgitation) rather than absorbed later.
+  const GUT_POOL_CAPACITY_G = 150;
 
-  // Spread each intake event over enough blocks to cover ABSORB_WINDOW_MIN of
-  // ride time. Independent of block resolution.
-  const ABSORB_BLOCKS = Math.max(1, Math.round(ABSORB_WINDOW_MIN / blockMinutes));
+  // Build absQueue: per-block scheduled intake into the gut pool. Each event's
+  // carbs are spread uniformly over `windowMin` of ride time, where windowMin
+  // depends on the event's `isLiquid` flag. Events missing the flag (legacy
+  // saves) default to solid (20 min) for backward compatibility.
   const absQueue = new Array(stream.length).fill(0);
   for (const e of intakeEvents) {
     const startBlock = stream.findIndex(pt => pt.time >= e.time);
     if (startBlock === -1) continue;
-    const gPerBlock = (e.carbs || 0) / ABSORB_BLOCKS;
-    for (let b = startBlock; b < Math.min(startBlock + ABSORB_BLOCKS, stream.length); b++) {
+    const windowMin = e.isLiquid ? ABSORB_WINDOW_LIQUID_MIN : ABSORB_WINDOW_SOLID_MIN;
+    const absorbBlocks = Math.max(1, Math.round(windowMin / blockMinutes));
+    const gPerBlock = (e.carbs || 0) / absorbBlocks;
+    for (let b = startBlock; b < Math.min(startBlock + absorbBlocks, stream.length); b++) {
       absQueue[b] += gPerBlock;
     }
   }
+
+  // B-27: gut-pool model with carry-over. Per block:
+  //   1. New scheduled intake adds to the gut pool.
+  //   2. If the pool now exceeds GUT_POOL_CAPACITY_G, excess is rejected
+  //      (recorded as `overLimit`, NOT carried forward).
+  //   3. Absorb up to MAX_ABSORPTION × dt from what's in the pool; the rest
+  //      stays in the pool and carries to the next block.
+  //
+  // `overLimit` semantic changed: previously "exceeded per-block absorption
+  // cap" (silently dropped the per-block excess). Now: "exceeded gut pool
+  // capacity" (body genuinely rejected the carbs because the gut was full).
+  // Excess carbs that previously dropped silently now carry forward and
+  // absorb on subsequent blocks. Conservation invariant:
+  //   sum(intake events) ≈ sum(actualAbsorbed) + final gutPool + sum(overLimit)
+  // (≈ because intake events landing within ABSORB_WINDOW_MIN of stream end
+  // are partially un-scheduled — separate concern, deferred.)
+  let gutPool = 0;
 
   return stream.map((pt, idx) => {
     const burnRate = carbOxidationRate(pt.power, athlete.ftp); // g/hr
     const burned = burnRate * (blockMinutes / 60); // g burned this block
 
-    const scheduledIntake = absQueue[idx];
+    gutPool += absQueue[idx];
+
+    // Cap-then-absorb order: if intake would overflow gut capacity, the excess
+    // is rejected up front rather than absorbed and then expelled. Slightly
+    // more conservative than absorb-then-cap; matches GI-tolerance intuition.
+    const overLimit = Math.max(0, gutPool - GUT_POOL_CAPACITY_G);
+    gutPool = Math.min(gutPool, GUT_POOL_CAPACITY_G);
+
     const maxAbsorbThisBlock = MAX_ABSORPTION * (blockMinutes / 60);
-    const actualAbsorbed = Math.min(scheduledIntake, maxAbsorbThisBlock);
-    const overLimit = Math.max(0, scheduledIntake - maxAbsorbThisBlock);
+    const actualAbsorbed = Math.min(gutPool, maxAbsorbThisBlock);
+    gutPool -= actualAbsorbed;
 
     // Point-in-time intake for reference markers (one block's window).
     const pointIntake = intakeEvents
@@ -289,7 +323,7 @@ function buildNutritionOverlay(stream, intakeEvents, athlete, glycogenScale, blo
       burnRate: Math.round(burnRate),
       glycogenReserve: Math.round(glycogenReserve),
       reservePct: Math.round((glycogenReserve / maxGlycogen) * 100),
-      gutPool: 0,
+      gutPool: Math.round(gutPool),
       intakeRate: Math.round(actualAbsorbed * (60 / blockMinutes)), // g/block → g/hr
       intake: Math.round(pointIntake),
       actualAbsorbed: Math.round(actualAbsorbed),
@@ -462,13 +496,18 @@ const DEFAULT_ATHLETE = {
   cpTestedAt: null,
   maxCarbIntakeGPerHr: 90,
 };
+// B-28: `isLiquid` drives absorption-window selection in buildNutritionOverlay
+// (60 min for liquids sipped over time; 20 min for gels/chews/bars/food
+// consumed in seconds). Default-product classification:
+//   • Gels / chews / bars / banana / generic food → solid (false)
+//   • Drink mixes / bottles / hydration → liquid (true)
 const DEFAULT_PRODUCTS = [
-  { id: 1, name: "Gel (Maurten 100)", carbs: 25, sodium: 55 },
-  { id: 2, name: "Chews (Clif Bloks)", carbs: 24, sodium: 50 },
-  { id: 3, name: "Bar (Maurten 160)", carbs: 40, sodium: 55 },
-  { id: 4, name: "Drink Mix (Maurten 160)", carbs: 40, sodium: 110 },
-  { id: 5, name: "Banana", carbs: 27, sodium: 1 },
-  { id: 6, name: "Custom Food", carbs: 30, sodium: 100 },
+  { id: 1, name: "Gel (Maurten 100)",       carbs: 25, sodium:  55, isLiquid: false },
+  { id: 2, name: "Chews (Clif Bloks)",      carbs: 24, sodium:  50, isLiquid: false },
+  { id: 3, name: "Bar (Maurten 160)",       carbs: 40, sodium:  55, isLiquid: false },
+  { id: 4, name: "Drink Mix (Maurten 160)", carbs: 40, sodium: 110, isLiquid: true  },
+  { id: 5, name: "Banana",                  carbs: 27, sodium:   1, isLiquid: false },
+  { id: 6, name: "Custom Food",             carbs: 30, sodium: 100, isLiquid: false },
 ];
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -1259,11 +1298,18 @@ function IntakeRow({ event, onRemove, products }) {
 function IntakeForm({ products, onAdd, maxTime }) {
   const [selProd, setSelProd] = useState(products[0]?.id || 1);
   const [timeMin, setTimeMin] = useState(30);
+  const selectedProduct = products.find(p => p.id === Number(selProd));
 
   const handleAdd = () => {
-    const prod = products.find(p => p.id === Number(selProd));
-    if (!prod) return;
-    onAdd({ id: Date.now(), time: timeMin, productId: prod.id, name: prod.name, carbs: prod.carbs, sodium: prod.sodium });
+    if (!selectedProduct) return;
+    // B-28: snapshot isLiquid alongside other product fields. Future edits to
+    // the product won't retroactively change this intake event's absorption
+    // window — matches the existing carbs/sodium snapshot semantic.
+    onAdd({
+      id: Date.now(), time: timeMin, productId: selectedProduct.id,
+      name: selectedProduct.name, carbs: selectedProduct.carbs, sodium: selectedProduct.sodium,
+      isLiquid: selectedProduct.isLiquid ?? false,
+    });
   };
 
   return (
@@ -1285,6 +1331,13 @@ function IntakeForm({ products, onAdd, maxTime }) {
         </div>
         <button className="btn-primary" onClick={handleAdd}>+ Add</button>
       </div>
+      {/* B-28: hint shown only for liquid products — silent for the (default)
+          solid case to avoid clutter. */}
+      {selectedProduct?.isLiquid && (
+        <div style={{ fontSize: 10, color: T.textDim, marginTop: 6, fontStyle: "italic" }}>
+          Liquid — absorbs over ~60 min
+        </div>
+      )}
     </div>
   );
 }
@@ -2852,9 +2905,27 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                 const bonkPt = overlayData.find(d => d.reservePct < 10);
                 const warnPt = overlayData.find(d => d.reservePct < 30);
                 const overLimitPt = overlayData.find(d => d.overLimit > 0);
+                // B-27: gut backlog sustained — gut pool above 50g for ≥10 min.
+                // Body is processing slower than intake; recommend spacing fuel.
+                let gutBacklogSustainedPt = null;
+                {
+                  let streakStart = null;
+                  for (const pt of overlayData) {
+                    if (pt.gutPool > 50) {
+                      if (streakStart === null) streakStart = pt;
+                      else if (pt.time - streakStart.time >= 10) {
+                        gutBacklogSustainedPt = streakStart;
+                        break;
+                      }
+                    } else {
+                      streakStart = null;
+                    }
+                  }
+                }
                 if (bonkPt) nutritionAlerts.push({ type: "danger", msg: `Projected glycogen depletion (bonk risk) at ${minsToHHMM(bonkPt.time)}. Add carbs.` });
                 else if (warnPt) nutritionAlerts.push({ type: "warn", msg: `Glycogen drops below 30% at ${minsToHHMM(warnPt.time)}. Consider adding carbs.` });
-                if (overLimitPt) nutritionAlerts.push({ type: "warn", msg: `Absorption ceiling exceeded at ${minsToHHMM(overLimitPt.time)} — spread intake more evenly.` });
+                if (overLimitPt) nutritionAlerts.push({ type: "warn", msg: `Gut backlog: intake exceeds gut capacity at ${minsToHHMM(overLimitPt.time)} — consider spacing intake further apart.` });
+                if (gutBacklogSustainedPt) nutritionAlerts.push({ type: "warn", msg: `Gut backlog sustained: gut pool >50g for 10+ minutes starting at ${minsToHHMM(gutBacklogSustainedPt.time)}. Body is processing fuel slower than intake.` });
               }
               return nutritionAlerts.length > 0 ? (
                 <div style={{ width: "100%", marginBottom: 8 }}>
@@ -3006,6 +3077,8 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   // plan's setting when a race is loaded; falls back to "light_meal" otherwise.
   // User can override on ANALYZE if their actual race-morning prep differed.
   const [analyzePreRaceFueling, setAnalyzePreRaceFueling] = useState(PRE_RACE_FUELING_DEFAULT_ID);
+  // B-33: short-lived flag for the "Saved ✓" flash on the Save Fuel Log button.
+  const [actualIntakeSavedFlash, setActualIntakeSavedFlash] = useState(false);
   // B-32: visible while parseFIT runs AND while the subsequent render's
   // alignFitToGpx useMemo blocks (5–9s on typical fixtures). Cleared in the
   // same render that paints results.
@@ -3022,6 +3095,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     if (!selectedRaceId) {
       setFitSaved(false); setNoPowerToastDismissed(false);
       setAnalyzePreRaceFueling(PRE_RACE_FUELING_DEFAULT_ID);
+      setActualIntake([]);
       return;
     }
     const race = races.find(r => r.id === Number(selectedRaceId));
@@ -3029,6 +3103,9 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     // without preRaceFueling fall through to the default — see migration in
     // PlanTab loader). User can still override on ANALYZE after this.
     setAnalyzePreRaceFueling(race?.plan?.nutritionPlan?.preRaceFueling ?? PRE_RACE_FUELING_DEFAULT_ID);
+    // B-33: restore the persisted "actual fuel log" for this race. Legacy
+    // saves without `analyzeData.actualIntake` fall through to [].
+    setActualIntake(race?.analyzeData?.actualIntake ?? []);
     if (race?.fit) {
       setFitData(race.fit);
       setFitFile(race.fit.fileName ?? 'Saved FIT');
@@ -3089,6 +3166,25 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       setFitSaved(true);
     } catch (e) {
       alert('Failed to save FIT data: ' + e.message);
+    }
+  };
+
+  // B-33: explicit save for the ANALYZE-side "actual fuel log". Writes to
+  // `race.analyzeData.actualIntake` via saveActualIntake (read-merge to
+  // preserve future analyzeData fields). UI shows a brief "Saved ✓" flash.
+  const handleSaveActualIntake = async () => {
+    if (!selectedRaceId || actualIntake.length === 0) return;
+    const id = Number(selectedRaceId);
+    try {
+      await saveActualIntake(id, actualIntake);
+      setRaces(prev => prev.map(r => r.id === id
+        ? { ...r, analyzeData: { ...(r.analyzeData ?? {}), actualIntake: [...actualIntake] } }
+        : r));
+      console.log(`Actual fuel log saved (${actualIntake.length} entries) to race ${id}`);
+      setActualIntakeSavedFlash(true);
+      setTimeout(() => setActualIntakeSavedFlash(false), 1500);
+    } catch (e) {
+      alert('Failed to save fuel log: ' + e.message);
     }
   };
 
@@ -5045,6 +5141,22 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               )}
             </>
           )}
+          {/* B-33: explicit save for the actual fuel log */}
+          {(() => {
+            const disabled = !selectedRaceId || actualIntake.length === 0;
+            return (
+              <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  className="btn-primary"
+                  disabled={disabled}
+                  onClick={handleSaveActualIntake}
+                  title={!selectedRaceId ? "Select a race first" : actualIntake.length === 0 ? "Add at least one fuel event first" : ""}
+                  style={{ opacity: disabled ? 0.4 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>
+                  {actualIntakeSavedFlash ? "Saved ✓" : "Save Fuel Log"}
+                </button>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -5236,19 +5348,19 @@ function BikesTab({ bikes, setBikes, activeBikeId, setActiveBikeId, imperial }) 
 }
 
 function LibraryTab({ products, setProducts }) {
-  const [form, setForm] = useState({ name: "", carbs: 0, sodium: 0 });
+  const [form, setForm] = useState({ name: "", carbs: 0, sodium: 0, isLiquid: false });
   const [editingId, setEditingId] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const isEditing = editingId !== null;
 
   const startEdit = (p) => {
     setEditingId(p.id);
-    setForm({ name: p.name, carbs: p.carbs, sodium: p.sodium });
+    setForm({ name: p.name, carbs: p.carbs, sodium: p.sodium, isLiquid: p.isLiquid ?? false });
   };
 
   const cancelEdit = () => {
     setEditingId(null);
-    setForm({ name: "", carbs: 0, sodium: 0 });
+    setForm({ name: "", carbs: 0, sodium: 0, isLiquid: false });
   };
 
   const submit = () => {
@@ -5267,12 +5379,19 @@ function LibraryTab({ products, setProducts }) {
     <div>
       <div className="card">
         <div className="card-header">Nutrition Products</div>
-        <div style={{ display: "grid", gridTemplateColumns: isEditing ? "2fr 80px 80px 80px 80px" : "2fr 80px 80px 80px", gap: 8, alignItems: "center", marginBottom: 12 }}>
-          <input type="text" placeholder="Product name" value={form.name} onChange={e => set("name", e.target.value)} />
-          <input type="number" placeholder="Carbs g" value={form.carbs || ""} onChange={e => set("carbs", Number(e.target.value))} />
-          <input type="number" placeholder="Na mg" value={form.sodium || ""} onChange={e => set("sodium", Number(e.target.value))} />
-          <button className="btn-primary" onClick={submit}>{isEditing ? "Save" : "Add"}</button>
-          {isEditing && <button className="btn-secondary" onClick={cancelEdit}>Cancel</button>}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: isEditing ? "2fr 80px 80px 80px 80px" : "2fr 80px 80px 80px", gap: 8, alignItems: "center", marginBottom: 6 }}>
+            <input type="text" placeholder="Product name" value={form.name} onChange={e => set("name", e.target.value)} />
+            <input type="number" placeholder="Carbs g" value={form.carbs || ""} onChange={e => set("carbs", Number(e.target.value))} />
+            <input type="number" placeholder="Na mg" value={form.sodium || ""} onChange={e => set("sodium", Number(e.target.value))} />
+            <button className="btn-primary" onClick={submit}>{isEditing ? "Save" : "Add"}</button>
+            {isEditing && <button className="btn-secondary" onClick={cancelEdit}>Cancel</button>}
+          </div>
+          {/* B-28: liquid flag drives 60-min vs 20-min absorption window */}
+          <label style={{ fontSize: 11, color: T.textMuted, display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+            <input type="checkbox" checked={!!form.isLiquid} onChange={e => set("isLiquid", e.target.checked)} />
+            Liquid (sipped over time, ~60 min absorption)
+          </label>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 80px 80px 56px", gap: 0 }}>
           {[["Name", "2fr"], ["Carbs", ""], ["Na (mg)", ""], ["", ""]].map(([h]) => (
@@ -5280,7 +5399,10 @@ function LibraryTab({ products, setProducts }) {
           ))}
           {products.map(p => (
             <>
-              <div key={`n${p.id}`} style={{ padding: "8px 10px", fontSize: 13, borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>{p.name}</div>
+              <div key={`n${p.id}`} style={{ padding: "8px 10px", fontSize: 13, borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>
+                {p.name}
+                {p.isLiquid && <span style={{ color: T.textDim, fontSize: 11, marginLeft: 6 }}>(liquid)</span>}
+              </div>
               <div key={`c${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.gold, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>{p.carbs}g</div>
               <div key={`s${p.id}`} style={{ padding: "8px 10px", fontSize: 13, color: T.textMuted, fontFamily: "Barlow Condensed", borderBottom: `1px solid ${T.border}`, background: p.id === editingId ? T.surface2 : "transparent" }}>{p.sodium}</div>
               <div key={`a${p.id}`} style={{ padding: "8px 4px", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 2, justifyContent: "flex-end", background: p.id === editingId ? T.surface2 : "transparent" }}>
@@ -5336,7 +5458,7 @@ export default function App() {
             {/* Logo */}
             <div style={{ fontFamily: "Barlow Condensed", fontWeight: 800, fontSize: 18, letterSpacing: "0.12em", color: T.red, marginRight: 24, padding: "12px 0", whiteSpace: "nowrap" }}>
               FUEL<span style={{ color: T.text }}>MAP</span>
-              <span style={{ fontSize: 10, color: T.textDim, marginLeft: 4, fontWeight: 400 }}>v2</span>
+              <span style={{ fontSize: 10, color: T.textDim, marginLeft: 4, fontWeight: 400 }}>Beta</span>
             </div>
 
             {/* Tabs */}

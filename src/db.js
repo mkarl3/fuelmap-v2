@@ -59,3 +59,25 @@ export async function deleteRace(id) {
     req.onerror = () => reject(req.error);
   });
 }
+
+// B-33: Save ANALYZE-side "what I actually ate" log onto the race record.
+// Persists at `race.analyzeData.actualIntake`. Does a read-merge inside the
+// transaction so any future fields added under `analyzeData` aren't blown away
+// by this write — `updateRace` only merges at the top level.
+export async function saveActualIntake(raceId, actualIntake) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const getReq = store.get(raceId);
+    getReq.onsuccess = () => {
+      const existing = getReq.result;
+      if (!existing) { reject(new Error(`Race ${raceId} not found`)); return; }
+      const analyzeData = { ...(existing.analyzeData ?? {}), actualIntake };
+      const putReq = store.put({ ...existing, analyzeData, id: raceId });
+      putReq.onsuccess = () => resolve();
+      putReq.onerror = () => reject(putReq.error);
+    };
+    getReq.onerror = () => reject(getReq.error);
+  });
+}
