@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ComposedChart, ReferenceLine, ReferenceArea } from "recharts";
+import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ComposedChart, ReferenceLine, ReferenceArea, Customized } from "recharts";
 import { loadAllRaces, saveRace, updateRace, deleteRace, saveActualIntake } from './db.js';
 import { parseFIT, inferHasPower, inferHasHR } from './parsers/fitParser';
 import {
@@ -3289,16 +3289,21 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     if (!power || power.length === 0) return [];
     const hr = fitData?.movingHRSeries ?? [];
     const dist = fitData?.movingDistSeries ?? [];
+    const alt = fitData?.movingAltSeries ?? [];
     const out = [];
     let cumDistM = 0;
     for (let i = 0; i < power.length; i += 60) {
       const slicePower = power.slice(i, i + 60);
       const sliceHR = hr.slice(i, i + 60).filter(h => h > 0);
       const sliceDist = dist.slice(i, i + 60);
+      const sliceAlt = alt.slice(i, i + 60).filter(a => a != null && isFinite(a));
       const blockDistM = sliceDist.reduce((s, d) => s + (d || 0), 0);
       const blockStartM = cumDistM;
       cumDistM += blockDistM;
       const avgP = Math.round(slicePower.reduce((s, p) => s + p, 0) / slicePower.length);
+      const avgAltM = sliceAlt.length
+        ? Math.round(sliceAlt.reduce((s, a) => s + a, 0) / sliceAlt.length)
+        : null;
       out.push({
         time: Math.round(i / 60),                     // minute index
         power: avgP,
@@ -3306,10 +3311,11 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         hr: sliceHR.length ? Math.round(sliceHR.reduce((s, h) => s + h, 0) / sliceHR.length) : 0,
         fitDistM: blockStartM,                        // cumulative FIT distance at block start
         blockDistM,                                   // distance covered in this block
+        altM: avgAltM,                                // per-minute average altitude in meters (null if no FIT alt)
       });
     }
     return out;
-  }, [fitData?.movingPowerSeries, fitData?.movingHRSeries, fitData?.movingDistSeries, athlete.ftp]);
+  }, [fitData?.movingPowerSeries, fitData?.movingHRSeries, fitData?.movingDistSeries, fitData?.movingAltSeries, athlete.ftp]);
 
   const fitOverlay = fitMinStream.length
     ? buildNutritionOverlay(fitMinStream, actualIntake, athlete, fuelingScale(analyzePreRaceFueling), 1) : [];
@@ -3759,28 +3765,97 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         </div>
       )}
 
-      {/* Power Analysis — actual as filled area (zone-colored stroke), planned as muted line.
-           Gap between the two = delta at a glance. Standalone mode: area only, no planned line. */}
+      {/* Power Analysis — planned as muted bars, actual as a clean line,
+           elevation area in back. Source data downsampled to BUCKET_MIN-minute
+           buckets so the chart reads as a pattern rather than per-minute noise. */}
       {hasPower && fitMinStream.length > 0 && (() => {
-        const allVals = overlayChartData.flatMap(d => [d.actualPower || 0, d.plannedPower || 0]).filter(Boolean);
-        const yMax = Math.ceil((Math.max(...allVals) * 1.12) / 50) * 50;
-        const yMin = Math.max(0, Math.floor((Math.min(...allVals) * 0.88) / 50) * 50);
+        const BUCKET_MIN = 3;
+        // Aggregate per-minute overlayChartData into BUCKET_MIN-minute buckets.
+        // Both bars and line consume the same bucketed data so the visual
+        // comparison is apples-to-apples at one resolution.
+        const displayData = [];
+        for (let i = 0; i < overlayChartData.length; i += BUCKET_MIN) {
+          const slice = overlayChartData.slice(i, i + BUCKET_MIN);
+          if (slice.length === 0) continue;
+          const validPlan = slice.filter(d => d.plannedPower != null && d.plannedPower > 0);
+          const validAlt = slice.filter(d => d.altM != null);
+          const avgActual = Math.round(slice.reduce((s, d) => s + (d.actualPower || 0), 0) / slice.length);
+          const avgPlanned = validPlan.length > 0
+            ? Math.round(validPlan.reduce((s, d) => s + d.plannedPower, 0) / validPlan.length)
+            : null;
+          const avgAltM = validAlt.length > 0
+            ? validAlt.reduce((s, d) => s + d.altM, 0) / validAlt.length
+            : null;
+          displayData.push({
+            fitDistDisp: slice[0].fitDistDisp,
+            time: slice[0].time,
+            actualPower: avgActual,
+            plannedPower: avgPlanned,
+            altM: avgAltM,
+            offRoute: slice.every(d => d.offRoute),
+          });
+        }
+        const allPwr = displayData.flatMap(d => [d.actualPower || 0, d.plannedPower || 0]).filter(v => v > 0);
+        const yPwrMax = allPwr.length
+          ? Math.ceil((Math.max(...allPwr) * 1.12) / 50) * 50
+          : Math.ceil(athlete.ftp * 1.4 / 50) * 50;
+        // Elevation: render only when the FIT had altitude data.
+        const altVals = displayData.map(d => d.altM).filter(a => a != null);
+        const hasAlt = altVals.length > 0;
+        const eleData = hasAlt
+          ? displayData.map(d => ({ ...d, ele: d.altM != null ? (imperial ? Math.round(d.altM * 3.281) : Math.round(d.altM)) : null }))
+          : displayData;
+        const eles = eleData.map(d => d.ele).filter(e => e != null);
+        const roundTo = imperial ? 50 : 10;
+        const minEle = eles.length ? Math.floor(Math.min(...eles) / roundTo) * roundTo : 0;
+        const maxEle = eles.length ? Math.ceil(Math.max(...eles) / roundTo) * roundTo : (imperial ? 1640 : 500);
+        const eleUnit = imperial ? "ft" : "m";
+        const useFTP = athlete.ftp || 250;
+        // Average bucket width (in display-distance units) used as fallback
+        // for the last bucket's right edge.
+        const avgBucketWidth = eleData.length > 1
+          ? (eleData[eleData.length - 1].fitDistDisp - eleData[0].fitDistDisp) / (eleData.length - 1)
+          : 1;
+        // Planned-power bars rendered via Customized layer (Recharts' Bar
+        // doesn't compute reliable widths with a non-uniform numeric x-axis).
+        // Single muted color so the bars recede as a backdrop and the actual
+        // line stays the visual focus.
+        const PlannedBarsLayer = ({ xAxisMap, yAxisMap }) => {
+          if (!xAxisMap || !yAxisMap) return null;
+          const xMap = xAxisMap[Object.keys(xAxisMap)[0]];
+          const yMap = yAxisMap['pwr'];
+          if (!xMap?.scale || !yMap?.scale) return null;
+          const yBase = yMap.scale(0);
+          return (
+            <g>
+              {eleData.map((d, i) => {
+                if (d.plannedPower == null || d.plannedPower <= 0) return null;
+                const nextX = eleData[i + 1]?.fitDistDisp ?? d.fitDistDisp + avgBucketWidth;
+                const xStart = xMap.scale(d.fitDistDisp);
+                const xEnd = xMap.scale(nextX);
+                const yTop = yMap.scale(d.plannedPower);
+                const w = Math.max(2, xEnd - xStart - 1);
+                const h = Math.max(0, yBase - yTop);
+                if (h <= 0) return null;
+                return <rect key={i} x={xStart} y={yTop} width={w} height={h} fill="rgba(140,160,180,0.28)" rx={1} />;
+              })}
+            </g>
+          );
+        };
         return (
           <div className="card">
             <div className="card-header">Power Analysis</div>
-            <div style={{ height: 210 }}>
+            <div style={{ height: 220 }}>
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={overlayChartData} margin={{ top: 8, right: 44, bottom: 4, left: 0 }}>
+                <ComposedChart data={eleData} margin={{ top: 8, right: 44, bottom: 4, left: 0 }}>
                   <defs>
-                    <linearGradient id="actualAreaFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%"  stopColor={T.blue} stopOpacity={0.18} />
-                      <stop offset="95%" stopColor={T.blue} stopOpacity={0.03} />
+                    <linearGradient id="analyzeEleFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%"   stopColor="rgb(120,130,140)" stopOpacity={0.10} />
+                      <stop offset="100%" stopColor="rgb(120,130,140)" stopOpacity={0.40} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="2 4" stroke={T.border} />
-                  {/* 4C sub-step 4: off-route bands — pre-route warmup,
-                      mid-route detour, post-route cooldown. Rendered before
-                      Area/Line so they sit behind the data. */}
+                  {/* 4C sub-step 4: off-route bands behind everything. */}
                   {offRouteSpans?.map((span, i) => {
                     const distScale = imperial ? 1 / 1609.344 : 1 / 1000;
                     return (
@@ -3790,19 +3865,22 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                         stroke="none" />
                     );
                   })}
-                  {/* 4C sub-step 2: x-axis is FIT distance (km/mi) — Scheme D. */}
                   <XAxis dataKey="fitDistDisp" type="number" domain={['dataMin', 'dataMax']}
                     tick={{ fill: T.textDim, fontSize: 10 }}
                     tickFormatter={v => `${Math.round(v)}${imperial ? "mi" : "km"}`} />
-                  <YAxis domain={[yMin, yMax]} tick={{ fill: T.textDim, fontSize: 10 }}
-                    width={40} tickFormatter={v => `${v}w`} />
+                  {hasAlt && (
+                    <YAxis yAxisId="ele" domain={[minEle, maxEle]} tick={{ fill: T.textDim, fontSize: 10 }}
+                      width={40} tickFormatter={v => `${v}${eleUnit}`} />
+                  )}
+                  <YAxis yAxisId="pwr" orientation="right" domain={[0, yPwrMax]}
+                    tick={{ fill: T.textDim, fontSize: 10 }} width={40} tickFormatter={v => `${v}w`} />
                   <Tooltip content={({ active, payload }) => {
                     if (!active || !payload?.length) return null;
                     const d = payload[0]?.payload;
                     const ap = d?.actualPower || 0;
                     const pp = d?.plannedPower;
                     const isOffRoute = !!d?.offRoute;
-                    const pct = ap / athlete.ftp;
+                    const pct = ap / useFTP;
                     const zLabel = pct < 0.55 ? "Z1" : pct < 0.75 ? "Z2" : pct < 0.85 ? "Z3" : pct < 0.95 ? "Z4" : "Z5";
                     const delta = pp != null ? ap - pp : null;
                     const distLabel = `${(d?.fitDistDisp ?? 0).toFixed(1)}${imperial ? "mi" : "km"}`;
@@ -3826,46 +3904,47 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                             </span>
                           </div>
                         )}
+                        {hasAlt && d?.ele != null && (
+                          <div style={{ color: T.textMuted, marginTop: 2, fontSize: 11 }}>Elev: {d.ele}{eleUnit}</div>
+                        )}
                       </div>
                     );
                   }} />
-                  {/* Actual — filled area with zone-colored stroke */}
-                  <Area dataKey="actualPower" name="Actual"
+                  {/* Elevation area — backdrop watermark, no stroke, gradient fades to near-invisible at top. */}
+                  {hasAlt && (
+                    <Area yAxisId="ele" type="monotone" dataKey="ele"
+                      fill="url(#analyzeEleFill)" stroke="none"
+                      name="Elevation" unit={eleUnit} isAnimationActive={false} />
+                  )}
+                  {/* Planned — zone-colored bars matching PLAN-tab ElevPowerChart. */}
+                  {selectedPlan && <Customized component={PlannedBarsLayer} />}
+                  {/* Actual — clean blue stroke on top of bars. */}
+                  <Line yAxisId="pwr" dataKey="actualPower" name="Actual"
                     type="monotone"
                     stroke={T.blue} strokeWidth={2}
-                    fill="url(#actualAreaFill)"
                     dot={false} activeDot={{ r: 3, fill: T.blue }}
+                    isAnimationActive={false}
                   />
-                  {/* Planned — thin muted line, no fill. Recedes behind actual.
-                      4C sub-step 2: connectNulls={false} so plan line breaks
-                      naturally at off-route stretches and skipped blocks
-                      (where plannedPower is undefined for that x position). */}
-                  {selectedPlan && (
-                    <Line dataKey="plannedPower" name="Planned"
-                      type="monotone"
-                      stroke="rgba(0,212,255,0.35)" strokeWidth={1.5}
-                      strokeDasharray="5 3"
-                      dot={false}
-                      connectNulls={false}
-                    />
-                  )}
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
             {/* Legend */}
-            <div style={{ display: "flex", gap: 16, marginTop: 6, fontSize: 11, color: T.textMuted }}>
+            <div style={{ display: "flex", gap: 16, marginTop: 6, fontSize: 11, color: T.textMuted, flexWrap: "wrap" }}>
               <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
                 <span style={{ display: "inline-block", width: 20, height: 2, background: T.blue, borderRadius: 1 }} />
                 Actual
               </span>
               {selectedPlan && (
                 <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                  <span style={{ display: "inline-block", width: 20, height: 0, borderTop: "1.5px dashed rgba(0,212,255,0.45)" }} />
-                  Planned
+                  <span style={{ display: "inline-block", width: 14, height: 10, background: "rgba(140,160,180,0.45)", borderRadius: 1 }} />
+                  Planned (3-min avg)
                 </span>
               )}
-              {selectedPlan && (
-                <span style={{ fontSize: 10, color: T.textDim, marginLeft: 4 }}>gap = delta vs plan</span>
+              {hasAlt && (
+                <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <span style={{ display: "inline-block", width: 14, height: 6, background: "rgba(120,130,140,0.35)", borderRadius: 1 }} />
+                  Elevation
+                </span>
               )}
             </div>
             {/* Zone distribution */}
