@@ -899,6 +899,10 @@ const ZoneBar = (props) => {
 // `powerStream` directly. `peakGrade` was promoted onto `powerStream` so the
 // elevation overlay still has terrain-peak emphasis.
 function ElevPowerChart({ powerStream, gpxStats, ftp, imperial = false, detectedClimbs = [], durationMin, estimatedDurationMin }) {
+  // Smoothing: N-min rolling buckets for the planned-power bars. 1 = raw
+  // per-minute (no smoothing). Same control pattern as ANALYZE-tab Power Analysis.
+  const [smoothingMin, setSmoothingMin] = useState(1);
+
   if (!powerStream || powerStream.length === 0) return null;
 
   const elevProfile = gpxStats?.elevProfile || [];
@@ -920,12 +924,32 @@ function ElevPowerChart({ powerStream, gpxStats, ftp, imperial = false, detected
   const totalDurationMin = durationMin ?? rawDuration;
   const viScale = rawDuration > 0 ? totalDurationMin / rawDuration : 1;
 
-  const data = powerStream.map((pt) => {
+  const rawData = powerStream.map((pt) => {
     const midDistKm = pt.distKm + blockDistKm / 2;
     const eleM = eleAtDistKm(midDistKm);
     const ele = imperial ? Math.round(eleM * 3.281) : Math.round(eleM);
     return { ...pt, time: Math.round(pt.time * viScale), ele };
   });
+
+  // Bucket the per-minute data into smoothingMin-minute windows. peakGrade
+  // keeps the max within the window (preserves "biggest pinch" semantic);
+  // power/grade/speed/ele use bucket means; time/distKm take bucket start.
+  const data = smoothingMin <= 1 ? rawData : (() => {
+    const out = [];
+    for (let i = 0; i < rawData.length; i += smoothingMin) {
+      const slice = rawData.slice(i, i + smoothingMin);
+      if (slice.length === 0) continue;
+      out.push({
+        ...slice[0],
+        power:    Math.round(slice.reduce((s, d) => s + (d.power    || 0), 0) / slice.length),
+        ele:      Math.round(slice.reduce((s, d) => s + (d.ele      || 0), 0) / slice.length),
+        grade:    Math.round((slice.reduce((s, d) => s + (d.grade   || 0), 0) / slice.length) * 10) / 10,
+        speedKph: Math.round((slice.reduce((s, d) => s + (d.speedKph|| 0), 0) / slice.length) * 10) / 10,
+        peakGrade: Math.max(...slice.map(d => d.peakGrade || 0)),
+      });
+    }
+    return out;
+  })();
 
   const eleUnit = imperial ? "ft" : "m";
   const eles = data.map(d => d.ele).filter(e => e > 0);
@@ -960,7 +984,18 @@ function ElevPowerChart({ powerStream, gpxStats, ftp, imperial = false, detected
   });
 
   return (
-    <div style={{ height: 200, marginTop: 8 }}>
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, marginBottom: 4, fontSize: 11, color: T.textMuted }}>
+        <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>Smooth</span>
+        <input type="range" min={1} max={10} step={1}
+          value={smoothingMin}
+          onChange={e => setSmoothingMin(Number(e.target.value))}
+          style={{ width: 140 }} />
+        <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, color: T.text, minWidth: 38, textAlign: "right" }}>
+          {smoothingMin} min
+        </span>
+      </div>
+      <div style={{ height: 200 }}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={data} margin={{ top: 4, right: 44, bottom: 4, left: 0 }}>
           <CartesianGrid strokeDasharray="2 4" stroke={T.border} />
@@ -1003,6 +1038,7 @@ function ElevPowerChart({ powerStream, gpxStats, ftp, imperial = false, detected
           <Bar yAxisId="pwr" dataKey="power" name="Power" unit="w" shape={PowerBar} />
         </ComposedChart>
       </ResponsiveContainer>
+      </div>
     </div>
   );
 }
@@ -3143,6 +3179,10 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   const [analyzePreRaceFueling, setAnalyzePreRaceFueling] = useState(PRE_RACE_FUELING_DEFAULT_ID);
   // B-33: short-lived flag for the "Saved ✓" flash on the Save Fuel Log button.
   const [actualIntakeSavedFlash, setActualIntakeSavedFlash] = useState(false);
+  // Power Analysis chart smoothing — N-min rolling buckets for both planned
+  // bars and actual line. 1 = no smoothing (per-minute, raw data). Higher
+  // values trade detail for pattern readability on noisy rides.
+  const [powerSmoothingMin, setPowerSmoothingMin] = useState(1);
   // B-32: visible while parseFIT runs AND while the subsequent render's
   // alignFitToGpx useMemo blocks (5–9s on typical fixtures). Cleared in the
   // same render that paints results.
@@ -3769,7 +3809,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
            elevation area in back. Source data downsampled to BUCKET_MIN-minute
            buckets so the chart reads as a pattern rather than per-minute noise. */}
       {hasPower && fitMinStream.length > 0 && (() => {
-        const BUCKET_MIN = 3;
+        const BUCKET_MIN = Math.max(1, powerSmoothingMin);
         // Aggregate per-minute overlayChartData into BUCKET_MIN-minute buckets.
         // Both bars and line consume the same bucketed data so the visual
         // comparison is apples-to-apples at one resolution.
@@ -3844,7 +3884,19 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
         };
         return (
           <div className="card">
-            <div className="card-header">Power Analysis</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+              <div className="card-header" style={{ margin: 0 }}>Power Analysis</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: T.textMuted, flex: "0 1 240px", minWidth: 180 }}>
+                <span style={{ whiteSpace: "nowrap", fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>Smooth</span>
+                <input type="range" min={1} max={10} step={1}
+                  value={powerSmoothingMin}
+                  onChange={e => setPowerSmoothingMin(Number(e.target.value))}
+                  style={{ flex: 1 }} />
+                <span style={{ whiteSpace: "nowrap", fontFamily: "Barlow Condensed", fontWeight: 700, color: T.text, minWidth: 38, textAlign: "right" }}>
+                  {powerSmoothingMin} min
+                </span>
+              </div>
+            </div>
             <div style={{ height: 220 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={eleData} margin={{ top: 8, right: 44, bottom: 4, left: 0 }}>
@@ -3937,7 +3989,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               {selectedPlan && (
                 <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
                   <span style={{ display: "inline-block", width: 14, height: 10, background: "rgba(140,160,180,0.45)", borderRadius: 1 }} />
-                  Planned (3-min avg)
+                  Planned
                 </span>
               )}
               {hasAlt && (
