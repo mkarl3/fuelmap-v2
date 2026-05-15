@@ -11,6 +11,8 @@ import {
   alignFitToGpx,
   fitWarn,
   computeNP,
+  startingGlycogen, fuelingScale, fuelingMealCarbsG, buildNutritionOverlay,
+  PRE_RACE_FUELING, PRE_RACE_FUELING_DEFAULT_ID,
   COGGAN_ZONES, DEFAULTS,
 } from './physics/index.js';
 // (Prompt 3 rewrote detectClimbs to use the new climbCategory(climbStats)
@@ -198,139 +200,10 @@ const CLIMB_CATEGORIES = [
 //   np, avgP, pctFTP, wbalPctAtExit } — one entry per detected climb.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Realistic glycogen: ~300g base + small weight component (trained athlete)
-function startingGlycogen(weightKg) { return Math.round(weightKg * 5.5); }
-
-// Pre-race fueling presets — drive the starting glycogen reserve in
-// buildNutritionOverlay. Replaced the 0–300g slider that conflated single-meal
-// size with multi-day carb-loading state. Four user-friendly behavioral states
-// map to scaling factors on the weight-based glycogen baseline (`weight × 5.5g`).
-// Calibrated to span the existing 0.70–1.15 model range; "carb-loaded" sits at
-// 1.10 (below the 1.15 cap) so it's never literally saturating.
-// `mealCarbsPerKg` — grams of carbs per kg body weight in the pre-race meal.
-// Anchored to ACSM/ISSN guidance of 1–4 g/kg in the 4 hours pre-exercise.
-// Carb-loaded picks 1.8 g/kg (slightly above Full meal) — the multi-day loading
-// effect is in `glycogenScale`, but the race-morning meal is typically a touch
-// larger on a properly-loaded day. At 80kg these give 0 / 40 / 120 / 144 g —
-// within the descriptive ranges in `helper`. Scales naturally for lighter/heavier
-// riders.
-const PRE_RACE_FUELING = [
-  { id: "fasted",      label: "Fasted",      helper: "No meal in 4+ hours",                 glycogenScale: 0.70, mealCarbsPerKg: 0.0 },
-  { id: "light_meal",  label: "Light meal",  helper: "~30–60g carbs (banana, half bagel)",  glycogenScale: 0.82, mealCarbsPerKg: 0.5 },
-  { id: "full_meal",   label: "Full meal",   helper: "~80–150g carbs (full breakfast)",     glycogenScale: 0.92, mealCarbsPerKg: 1.5 },
-  { id: "carb_loaded", label: "Carb-loaded", helper: "Multi-day loading + race-day meal",   glycogenScale: 1.10, mealCarbsPerKg: 1.8 },
-];
-const PRE_RACE_FUELING_DEFAULT_ID = "light_meal";
-
-function fuelingScale(id) {
-  const preset = PRE_RACE_FUELING.find(p => p.id === id);
-  if (preset) return preset.glycogenScale;
-  // Unknown id (corrupt save, future-version downgrade) → default.
-  return PRE_RACE_FUELING.find(p => p.id === PRE_RACE_FUELING_DEFAULT_ID).glycogenScale;
-}
-
-// Pre-race meal carbs in grams (weight-scaled) — used to offset the BurnRateChart's
-// cumulative intake line so it starts from the pre-race buffer rather than 0.
-// Glycogen scale and meal grams are two facets of the same preset: glycogenScale
-// drives starting muscle/liver glycogen reserve (long-duration); meal grams
-// drive the absorbed carbs available in circulation at race start (short-duration
-// buffer). Per ACSM/ISSN guidance, both scale with athlete body weight.
-function fuelingMealCarbsG(id, weightKg) {
-  const preset = PRE_RACE_FUELING.find(p => p.id === id)
-    ?? PRE_RACE_FUELING.find(p => p.id === PRE_RACE_FUELING_DEFAULT_ID);
-  return Math.round((weightKg || 0) * preset.mealCarbsPerKg);
-}
-
-// 4C sub-step 1: fully parameterized on `blockMinutes` so the function works
-// at any block resolution. All internal time-dependent constants now scale
-// with the block size. Callers pass `blockMinutes=1` post-rebuild (1-min
-// powerStream on plan side; 1-min aggregated FIT stream on actual side).
-//
-// `glycogenScale`: multiplier on weight-based starting glycogen. Caller derives
-// from `fuelingScale(preRaceFuelingId)` (see PRE_RACE_FUELING constants).
-function buildNutritionOverlay(stream, intakeEvents, athlete, glycogenScale, blockMinutes = 1) {
-  if (!stream || stream.length === 0) return [];
-  let glycogenReserve = Math.round(startingGlycogen(athlete.weight) * glycogenScale);
-  const maxGlycogen = startingGlycogen(athlete.weight) * 1.15;
-  const MAX_ABSORPTION = 90; // g/hr max intestinal absorption
-  // B-28: per-product absorption windows. Solids (gels/chews/bars/food) are
-  // consumed in seconds and fully delivered into the gut over ~20 min. Liquids
-  // (bottles/drink mixes) are sipped over time and deliver carbs over ~60 min.
-  const ABSORB_WINDOW_SOLID_MIN  = 20;
-  const ABSORB_WINDOW_LIQUID_MIN = 60;
-  // B-27: typical upper-bound gut tolerance. Carbs beyond this are physiologically
-  // rejected (GI distress / nausea / regurgitation) rather than absorbed later.
-  const GUT_POOL_CAPACITY_G = 150;
-
-  // Build absQueue: per-block scheduled intake into the gut pool. Each event's
-  // carbs are spread uniformly over `windowMin` of ride time, where windowMin
-  // depends on the event's `isLiquid` flag. Events missing the flag (legacy
-  // saves) default to solid (20 min) for backward compatibility.
-  const absQueue = new Array(stream.length).fill(0);
-  for (const e of intakeEvents) {
-    const startBlock = stream.findIndex(pt => pt.time >= e.time);
-    if (startBlock === -1) continue;
-    const windowMin = e.isLiquid ? ABSORB_WINDOW_LIQUID_MIN : ABSORB_WINDOW_SOLID_MIN;
-    const absorbBlocks = Math.max(1, Math.round(windowMin / blockMinutes));
-    const gPerBlock = (e.carbs || 0) / absorbBlocks;
-    for (let b = startBlock; b < Math.min(startBlock + absorbBlocks, stream.length); b++) {
-      absQueue[b] += gPerBlock;
-    }
-  }
-
-  // B-27: gut-pool model with carry-over. Per block:
-  //   1. New scheduled intake adds to the gut pool.
-  //   2. If the pool now exceeds GUT_POOL_CAPACITY_G, excess is rejected
-  //      (recorded as `overLimit`, NOT carried forward).
-  //   3. Absorb up to MAX_ABSORPTION × dt from what's in the pool; the rest
-  //      stays in the pool and carries to the next block.
-  //
-  // `overLimit` semantic changed: previously "exceeded per-block absorption
-  // cap" (silently dropped the per-block excess). Now: "exceeded gut pool
-  // capacity" (body genuinely rejected the carbs because the gut was full).
-  // Excess carbs that previously dropped silently now carry forward and
-  // absorb on subsequent blocks. Conservation invariant:
-  //   sum(intake events) ≈ sum(actualAbsorbed) + final gutPool + sum(overLimit)
-  // (≈ because intake events landing within ABSORB_WINDOW_MIN of stream end
-  // are partially un-scheduled — separate concern, deferred.)
-  let gutPool = 0;
-
-  return stream.map((pt, idx) => {
-    const burnRate = carbOxidationRate(pt.power, athlete.ftp); // g/hr
-    const burned = burnRate * (blockMinutes / 60); // g burned this block
-
-    gutPool += absQueue[idx];
-
-    // Cap-then-absorb order: if intake would overflow gut capacity, the excess
-    // is rejected up front rather than absorbed and then expelled. Slightly
-    // more conservative than absorb-then-cap; matches GI-tolerance intuition.
-    const overLimit = Math.max(0, gutPool - GUT_POOL_CAPACITY_G);
-    gutPool = Math.min(gutPool, GUT_POOL_CAPACITY_G);
-
-    const maxAbsorbThisBlock = MAX_ABSORPTION * (blockMinutes / 60);
-    const actualAbsorbed = Math.min(gutPool, maxAbsorbThisBlock);
-    gutPool -= actualAbsorbed;
-
-    // Point-in-time intake for reference markers (one block's window).
-    const pointIntake = intakeEvents
-      .filter(e => e.time >= pt.time && e.time < pt.time + blockMinutes)
-      .reduce((s, e) => s + (e.carbs || 0), 0);
-
-    glycogenReserve = Math.min(maxGlycogen, Math.max(0, glycogenReserve - burned + actualAbsorbed));
-
-    return {
-      ...pt,
-      burnRate: Math.round(burnRate),
-      glycogenReserve: Math.round(glycogenReserve),
-      reservePct: Math.round((glycogenReserve / maxGlycogen) * 100),
-      gutPool: Math.round(gutPool),
-      intakeRate: Math.round(actualAbsorbed * (60 / blockMinutes)), // g/block → g/hr
-      intake: Math.round(pointIntake),
-      actualAbsorbed: Math.round(actualAbsorbed),
-      overLimit: Math.round(overLimit),
-    };
-  });
-}
+// Nutrition math moved to src/physics/helpers/buildNutritionOverlay.js,
+// src/physics/helpers/startingGlycogen.js, src/physics/helpers/fuelingHelpers.js,
+// and src/physics/constants/preRaceFueling.js. Imported from physics module
+// above. Same shape, same behavior — only the file location changed.
 
 
 // ─── GPX PARSER ───────────────────────────────────────────────────────────────

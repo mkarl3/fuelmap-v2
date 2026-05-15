@@ -13,6 +13,8 @@ export {
   RIDER_PHENOTYPES,
   CLIMB_CATEGORIES,
 } from './constants/referenceData.js';
+export { PRE_RACE_FUELING,
+         PRE_RACE_FUELING_DEFAULT_ID }     from './constants/preRaceFueling.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 export { powerAtSpeed }                    from './helpers/powerAtSpeed.js';
@@ -49,3 +51,7 @@ export { fitWarn,
          drainFitWarnBuffer }              from './helpers/fitWarn.js';
 export { alignFitToGpx,
          OFF_ROUTE_THRESHOLD_M }           from './helpers/alignFitToGpx.js';
+export { startingGlycogen }                from './helpers/startingGlycogen.js';
+export { fuelingScale,
+         fuelingMealCarbsG }               from './helpers/fuelingHelpers.js';
+export { buildNutritionOverlay }           from './helpers/buildNutritionOverlay.js';
