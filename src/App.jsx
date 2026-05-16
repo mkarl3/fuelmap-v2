@@ -336,8 +336,52 @@ function parseGPX(xmlText) {
 //  via the `fitMinStream` useMemo in AnalyzeTab. Keeps the rebuild's
 //  "visuals at 1-min, math at 1-sec" principle consistent.)
 
-// TODO(weather): replace manual entry with API fetch once deployed
-// fetchWeather(lat, lon, raceDate) → setWeatherContext(result)
+// ── B-35 weather shape (Slice A) ──────────────────────────────────────────
+// Structured weatherContext: each weather field carries value + provenance.
+// `source`: 'user' | 'forecast' | 'normal' | 'actual'. Slices B–D auto-fill
+// write forecast/normal/actual; user edits flip to 'user' and are never
+// overwritten by a re-fetch. `windEff` is NOT a weather observation — it's a
+// course/judgment input, kept as a plain user-only scalar; auto-fill never
+// touches it. `range` (low/high) is reference metadata for sliders; wind
+// direction carries `confidence` (0–1, circular consistency) instead.
+function defaultWeatherContext() {
+  return {
+    tempC:       { value: null, source: 'user', range: null },
+    precipPct:   { value: null, source: 'user', range: null },
+    windSpeedMs: { value: 0,    source: 'user', range: null },
+    windDirDeg:  { value: 270,  source: 'user', confidence: null },
+    windEff:     30,
+  };
+}
+
+// Wrap a legacy flat `conditions` object into the structured shape, tagged
+// user-sourced (every pre-B-35 value was manually entered). Idempotent — a
+// structured object passes through unchanged. No recompute, no data loss.
+function migrateWeather(c) {
+  if (!c) return defaultWeatherContext();
+  if (c.tempC && typeof c.tempC === 'object' && 'value' in c.tempC) return c;
+  return {
+    tempC:       { value: c.tempC ?? null,     source: 'user', range: null },
+    precipPct:   { value: c.precipPct ?? null, source: 'user', range: null },
+    windSpeedMs: { value: c.windSpeedMs ?? 0,  source: 'user', range: null },
+    windDirDeg:  { value: c.windDirDeg ?? 270, source: 'user', confidence: null },
+    windEff:     typeof c.windEff === 'number' ? c.windEff : 30,
+  };
+}
+
+// Derived flat read-model for physics/consumer code. Keeps the math untouched:
+// call sites read `weatherFlat(weatherContext).X` instead of every physics
+// signature churning to the structured shape.
+function weatherFlat(w) {
+  return {
+    tempC:       w?.tempC?.value ?? null,
+    precipPct:   w?.precipPct?.value ?? null,
+    windSpeedMs: w?.windSpeedMs?.value ?? 0,
+    windDirDeg:  w?.windDirDeg?.value ?? 270,
+    windEff:     typeof w?.windEff === 'number' ? w.windEff : 30,
+  };
+}
+
 // Air density correction: rho varies ~4% between 0°C and 35°C
 function degToCompass(deg) {
   const dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
@@ -1863,14 +1907,18 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       steep:    { min: 0, max: 0 },
       wall:     { min: 0, max: 0 },
     });
-  // TODO(weather): populated by fetchWeather() in full app
-  const [weatherContext, setWeatherContext] = useState({
-    tempC: null,       // null = not set; affects rho (air density)
-    precipPct: null,   // informational only for now
-    windSpeedMs: 0,    // m/s; fed into physics model
-    windDirDeg: 270,   // degrees from; fed into physics model
-    windEff: 30,       // % effectiveness (accounts for gusts, shelter, heading variation)
-  });
+  // B-35 Slice A: structured weather (value + provenance). Auto-fill arrives
+  // in Slices B–D; until then every field is user-sourced.
+  const [weatherContext, setWeatherContext] = useState(defaultWeatherContext);
+  // B-35: race date (+ optional start time) — net-new inputs (no prior field
+  // existed). Drives weather fetch in Slice B (forecast vs historical-normal),
+  // start time refines forecast hour / morning-vs-afternoon historical lean.
+  const [raceDate, setRaceDate] = useState("");       // 'YYYY-MM-DD' or ''
+  const [raceStartTime, setRaceStartTime] = useState(""); // 'HH:MM' or ''
+  // Per-field user edit: writes value and flips provenance to 'user' so a
+  // later re-fetch never clobbers a manual edit.
+  const setWeatherField = (key, value) =>
+    setWeatherContext(w => ({ ...w, [key]: { ...w[key], value, source: 'user' } }));
   const [goalTimeMin, setGoalTimeMin] = useState(240);
   const [numSegments, setNumSegments] = useState(3);
   const [segments, setSegments] = useState([]);
@@ -1912,21 +1960,24 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     }));
   };
 
+  // B-35: flat read-model for physics/summary — structured shape is the
+  // source of truth; the math reads scalars unchanged.
+  const wxFlat = weatherFlat(weatherContext);
   // Average headwind for summary display in the weather card
   const avgCourseBearing = gpxStats?.avgCourseBearing ?? 0;
-  const windHeadMs = weatherContext.windSpeedMs > 0
-    ? weatherContext.windSpeedMs * Math.cos(
-        ((weatherContext.windDirDeg - avgCourseBearing) * Math.PI) / 180
+  const windHeadMs = wxFlat.windSpeedMs > 0
+    ? wxFlat.windSpeedMs * Math.cos(
+        ((wxFlat.windDirDeg - avgCourseBearing) * Math.PI) / 180
       )
     : 0;
   // Note: buildPowerStream uses per-block bearings from gpxStats.courseBearings
   // Air density from temperature (falls back to standard if not set)
-  const rhoActual = rhoFromTemp(weatherContext.tempC);
+  const rhoActual = rhoFromTemp(wxFlat.tempC);
 
   const computePlan = () => {
     try {
       const Crr = _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr);
-      const effWindMs = weatherContext.windSpeedMs * (weatherContext.windEff / 100);
+      const effWindMs = wxFlat.windSpeedMs * (wxFlat.windEff / 100);
       const mxPwr = maxPower !== "" ? Number(maxPower) : Infinity;
 
       // Group C auto-restore: refill any cleared / zero `max` cap from the
@@ -1944,7 +1995,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       if (pacingMode === "constant_if") {
         const flatIF = flatIFForTargetNP(
           targetIF, effectiveStats, athlete, Crr, mxPwr, CdA, eta,
-          activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg,
+          activeBike.weight, rhoActual, effWindMs, wxFlat.windDirDeg,
           capsForPlan
         );
         // Spec 4.1 #2: flatIFForTargetNP can return a structured error when
@@ -1970,7 +2021,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             const mid = (lo + hi) / 2;
             const testStrat = { mode: "constant_if", targetIF: mid };
             // Search applies caps (spec 4.1 #1) — same physics in search and final.
-            const testResult = buildPowerStream(effectiveStats, athlete, testStrat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg, capsForPlan);
+            const testResult = buildPowerStream(effectiveStats, athlete, testStrat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, wxFlat.windDirDeg, capsForPlan);
             if (testResult && typeof testResult === 'object' && testResult.ok === false) break;
             const testVI = computeVI(effectiveStats, surfaceMix, testResult.estimatedDurationMin);
             testVI.correctedDurationMin > goalTimeMin ? lo = mid : hi = mid;
@@ -1984,7 +2035,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       // Search loops (flatIFForTargetNP, goal-time search, requiredIF preview)
       // still use static-cap buildPowerStream — converged IF then feeds the
       // surge-adjusted final pass. Routes with no detected climbs skip pass 2.
-      const result = buildPowerStreamWithSurge(effectiveStats, athlete, strat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, weatherContext.windDirDeg, capsForPlan);
+      const result = buildPowerStreamWithSurge(effectiveStats, athlete, strat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, wxFlat.windDirDeg, capsForPlan);
       // Group C: buildPowerStream may return a structured error if the climb-
       // cap auto-restore couldn't run (FTP missing). Surface to the user.
       if (result && typeof result === 'object' && result.ok === false) {
@@ -2057,6 +2108,8 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         pacingPlan,
         nutritionPlan: { preRaceFueling, intakeEvents: [...intakeEvents] },
         conditions: { ...weatherContext },
+        raceDate,            // B-35: '' when unset; structured weather persists as-is
+        raceStartTime,
         surfaceMix: [...surfaceMix],
         climbCategories: { ...climbCategories },
         pacingMode,
@@ -2090,7 +2143,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     setGpxStats(race.plan.route ?? null);
     setGpxFile(race.plan.gpxFileName ?? null);
     setSurfaceMix(race.plan.surfaceMix ?? [{ id: "tarmac", pct: 30 }, { id: "gravel_2", pct: 60 }, { id: "dirt", pct: 10 }]);
-    setWeatherContext(race.plan.conditions ?? { tempC: null, precipPct: null, windSpeedMs: 0, windDirDeg: 270, windEff: 30 });
+    // B-35: legacy flat `conditions` wrapped into structured shape (user-sourced).
+    setWeatherContext(migrateWeather(race.plan.conditions));
+    setRaceDate(race.plan.raceDate ?? "");
+    setRaceStartTime(race.plan.raceStartTime ?? "");
     setPacingMode(race.plan.pacingMode ?? 'constant_if');
     setTargetIF(race.plan.targetIF ?? 0.76);
     setMaxPower(race.plan.maxPower != null ? String(race.plan.maxPower) : '');
@@ -2125,6 +2181,11 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       steep:    { min: 0, max: 0 },
       wall:     { min: 0, max: 0 },
     });
+    // B-35: fresh race → clear the date (a stale date would mis-trigger the
+    // Slice-B weather fetch). weatherContext intentionally left as-is —
+    // preserving weather across a new race is pre-existing behavior.
+    setRaceDate("");
+    setRaceStartTime("");
   };
 
   const updateAthleteProfile = async () => {
@@ -2183,7 +2244,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   const requiredIF = (() => {
     if (pacingMode !== "time_targets" || goalTimeMin <= 0 || !effectiveStats?.totalDistKm) return null;
     const Crr = _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr);
-    const effWind = weatherContext.windSpeedMs * (weatherContext.windEff / 100);
+    const effWind = wxFlat.windSpeedMs * (wxFlat.windEff / 100);
     const mxPwr = maxPower !== "" ? Number(maxPower) : Infinity;
     // Live preview also uses the auto-restored caps so search-with-caps
     // behavior matches what computePlan will produce when the user clicks Generate.
@@ -2193,13 +2254,13 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       const mid = (lo + hi) / 2;
       const strat = { mode: "constant_if", targetIF: mid };
       // Search applies caps (spec 4.1 #1).
-      const r = buildPowerStream(effectiveStats, athlete, strat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWind, weatherContext.windDirDeg, previewCaps);
+      const r = buildPowerStream(effectiveStats, athlete, strat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWind, wxFlat.windDirDeg, previewCaps);
       if (r && typeof r === 'object' && r.ok === false) return null;
       const vi = computeVI(effectiveStats, surfaceMix, r.estimatedDurationMin);
       vi.correctedDurationMin > goalTimeMin ? lo = mid : hi = mid;
     }
     const finalStrat = { mode: "constant_if", targetIF: (lo + hi) / 2 };
-    const finalResult = buildPowerStream(effectiveStats, athlete, finalStrat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWind, weatherContext.windDirDeg, previewCaps);
+    const finalResult = buildPowerStream(effectiveStats, athlete, finalStrat, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWind, wxFlat.windDirDeg, previewCaps);
     if (finalResult && typeof finalResult === 'object' && finalResult.ok === false) return null;
     return Math.round(finalResult.ifActual * 100) / 100;
   })();
@@ -2390,9 +2451,28 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         )}
       </div>
 
-      {/* Race Conditions — manual entry now, fetch-ready for full app */}
+      {/* Race Conditions — B-35 Slice A: structured weather state + race
+          date/time inputs. Auto-fill (fetch + sliders + compass + source
+          indicators) lands in Slices B–D; inputs here stay manual for now,
+          rewired onto the structured {value, source} shape. */}
       <div className="card">
         <div className="card-header">Race Conditions</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+              Race Date
+              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>drives weather auto-fill (coming)</span>
+            </label>
+            <input type="date" value={raceDate} onChange={e => setRaceDate(e.target.value)} style={{ width: "100%" }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+              Start Time
+              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>optional — refines forecast hour</span>
+            </label>
+            <input type="time" value={raceStartTime} onChange={e => setRaceStartTime(e.target.value)} style={{ width: "100%" }} />
+          </div>
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <div>
             <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
@@ -2400,10 +2480,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>affects air density</span>
             </label>
             <input type="number" step={1} placeholder="e.g. 20"
-              value={weatherContext.tempC === null ? "" : (imperial ? Math.round(weatherContext.tempC * 9/5 + 32) : weatherContext.tempC)}
+              value={weatherContext.tempC.value === null ? "" : (imperial ? Math.round(weatherContext.tempC.value * 9/5 + 32) : weatherContext.tempC.value)}
               onChange={e => {
                 const v = e.target.value === "" ? null : Number(e.target.value);
-                setWeatherContext(w => ({ ...w, tempC: imperial && v !== null ? Math.round((v - 32) * 5/9 * 10)/10 : v }));
+                setWeatherField('tempC', imperial && v !== null ? Math.round((v - 32) * 5/9 * 10)/10 : v);
               }}
               style={{ width: "100%" }} />
           </div>
@@ -2413,8 +2493,8 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>informational</span>
             </label>
             <input type="number" min={0} max={100} step={5} placeholder="e.g. 20"
-              value={weatherContext.precipPct === null ? "" : weatherContext.precipPct}
-              onChange={e => setWeatherContext(w => ({ ...w, precipPct: e.target.value === "" ? null : Math.max(0, Math.min(100, Number(e.target.value))) }))}
+              value={weatherContext.precipPct.value === null ? "" : weatherContext.precipPct.value}
+              onChange={e => setWeatherField('precipPct', e.target.value === "" ? null : Math.max(0, Math.min(100, Number(e.target.value))))}
               style={{ width: "100%" }} />
           </div>
           <div>
@@ -2423,10 +2503,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>affects drag</span>
             </label>
             <input type="number" min={0} step={1} placeholder="0"
-              value={weatherContext.windSpeedMs === 0 ? "" : (imperial ? Math.round(weatherContext.windSpeedMs * 2.237 * 10)/10 : weatherContext.windSpeedMs)}
+              value={weatherContext.windSpeedMs.value === 0 ? "" : (imperial ? Math.round(weatherContext.windSpeedMs.value * 2.237 * 10)/10 : weatherContext.windSpeedMs.value)}
               onChange={e => {
                 const v = e.target.value === "" ? 0 : Number(e.target.value);
-                setWeatherContext(w => ({ ...w, windSpeedMs: imperial ? Math.round(v / 2.237 * 100)/100 : v }));
+                setWeatherField('windSpeedMs', imperial ? Math.round(v / 2.237 * 100)/100 : v);
               }}
               style={{ width: "100%" }} />
           </div>
@@ -2435,8 +2515,8 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               Wind From
             </label>
             <select
-              value={String(weatherContext.windDirDeg)}
-              onChange={e => setWeatherContext(w => ({ ...w, windDirDeg: Number(e.target.value) }))}
+              value={String(weatherContext.windDirDeg.value)}
+              onChange={e => setWeatherField('windDirDeg', Number(e.target.value))}
               style={{ width: "100%" }}>
               {[["N",0],["NNE",22],["NE",45],["ENE",67],["E",90],["ESE",112],["SE",135],["SSE",157],
                 ["S",180],["SSW",202],["SW",225],["WSW",247],["W",270],["WNW",292],["NW",315],["NNW",337]
@@ -2448,7 +2528,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           <div style={{ gridColumn: "1 / -1" }}>
             <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
               Wind Effectiveness
-              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>accounts for gusts, shelter, heading variation</span>
+              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>course/judgment input — never auto-filled</span>
             </label>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <input type="range" min={10} max={75} step={5}
@@ -2465,31 +2545,31 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           </div>
         </div>
         {/* Live summary — only shown when something is set */}
-        {(weatherContext.tempC !== null || weatherContext.precipPct !== null || weatherContext.windSpeedMs > 0) && (
+        {(wxFlat.tempC !== null || wxFlat.precipPct !== null || wxFlat.windSpeedMs > 0) && (
           <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {weatherContext.tempC !== null && (
+            {wxFlat.tempC !== null && (
               <span style={{ fontSize: 12, background: T.surface2, padding: "4px 10px", borderRadius: 3, fontFamily: "Barlow Condensed" }}>
                 <span style={{ color: T.textMuted }}>Temp </span>
-                <span style={{ color: T.text }}>{imperial ? Math.round(weatherContext.tempC * 9/5 + 32) : weatherContext.tempC}{imperial ? "°F" : "°C"}</span>
-                <span style={{ color: T.textDim, marginLeft: 6, fontSize: 11 }}>ρ={rhoFromTemp(weatherContext.tempC).toFixed(3)}</span>
+                <span style={{ color: T.text }}>{imperial ? Math.round(wxFlat.tempC * 9/5 + 32) : wxFlat.tempC}{imperial ? "°F" : "°C"}</span>
+                <span style={{ color: T.textDim, marginLeft: 6, fontSize: 11 }}>ρ={rhoFromTemp(wxFlat.tempC).toFixed(3)}</span>
               </span>
             )}
-            {weatherContext.precipPct !== null && (
+            {wxFlat.precipPct !== null && (
               <span style={{ fontSize: 12, background: T.surface2, padding: "4px 10px", borderRadius: 3, fontFamily: "Barlow Condensed" }}>
                 <span style={{ color: T.textMuted }}>Precip </span>
-                <span style={{ color: weatherContext.precipPct > 50 ? T.gold : T.text }}>{weatherContext.precipPct}%</span>
+                <span style={{ color: wxFlat.precipPct > 50 ? T.gold : T.text }}>{wxFlat.precipPct}%</span>
               </span>
             )}
-            {weatherContext.windSpeedMs > 0 && (() => {
-              const effMs = weatherContext.windSpeedMs * (weatherContext.windEff / 100);
-              const effHeadMs = effMs * Math.cos(((weatherContext.windDirDeg - avgCourseBearing) * Math.PI) / 180);
+            {wxFlat.windSpeedMs > 0 && (() => {
+              const effMs = wxFlat.windSpeedMs * (wxFlat.windEff / 100);
+              const effHeadMs = effMs * Math.cos(((wxFlat.windDirDeg - avgCourseBearing) * Math.PI) / 180);
               const color = effHeadMs > 1 ? T.red : effHeadMs < -1 ? T.green : T.gold;
               const label = effHeadMs > 1 ? "headwind" : effHeadMs < -1 ? "tailwind" : "crosswind";
               return (
                 <span style={{ fontSize: 12, background: T.surface2, padding: "4px 10px", borderRadius: 3, fontFamily: "Barlow Condensed" }}>
                   <span style={{ color: T.textMuted }}>Wind </span>
-                  <span style={{ color: T.text }}>{imperial ? Math.round(weatherContext.windSpeedMs * 2.237 * 10)/10 : weatherContext.windSpeedMs}{imperial ? "mph" : "m/s"} from {degToCompass(weatherContext.windDirDeg)}</span>
-                  <span style={{ color: T.textDim, marginLeft: 4 }}>({weatherContext.windEff}% eff)</span>
+                  <span style={{ color: T.text }}>{imperial ? Math.round(wxFlat.windSpeedMs * 2.237 * 10)/10 : wxFlat.windSpeedMs}{imperial ? "mph" : "m/s"} from {degToCompass(wxFlat.windDirDeg)}</span>
+                  <span style={{ color: T.textDim, marginLeft: 4 }}>({wxFlat.windEff}% eff)</span>
                   {gpxStats && <span style={{ color, marginLeft: 6 }}>≈ {Math.abs(Math.round(effHeadMs * 10)/10)} m/s {label}</span>}
                 </span>
               );
