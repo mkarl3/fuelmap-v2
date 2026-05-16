@@ -1189,16 +1189,32 @@ function WbalChart({ wbalData, athlete, gpxStats = null, imperial = false, durat
 }
 
 // ─── INTAKE EVENT ROW ─────────────────────────────────────────────────────────
-function IntakeRow({ event, onRemove, products }) {
+function IntakeRow({ event, onRemove, onConfirm, products }) {
   const prod = products.find(p => p.id === event.productId);
+  // B-34: pending state is provenance/UI metadata only — strict `=== false`
+  // so legacy entries (no flag → undefined) render as confirmed, never pending.
+  const isPending = event.confirmed === false;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: T.surface2, borderRadius: 4 }}>
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
+      background: T.surface2, borderRadius: 4,
+      // Solid transparent on confirmed keeps row height stable between states.
+      border: isPending ? `1px dashed ${T.gold}` : "1px solid transparent",
+    }}>
       <span style={{ color: T.textMuted, fontSize: 11, fontFamily: "Barlow Condensed", minWidth: 36 }}>
         {minsToHHMM(event.time)}
       </span>
-      <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.name}</span>
+      <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: isPending ? T.textMuted : T.text }}>
+        {event.name}
+        {isPending && (
+          <span style={{ color: T.gold, fontSize: 10, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.06em", marginLeft: 6, textTransform: "uppercase" }}>pending</span>
+        )}
+      </span>
       <span style={{ color: T.gold, fontSize: 12, fontFamily: "Barlow Condensed" }}>{event.carbs}g</span>
-      <button onClick={onRemove} style={{ background: "none", border: "none", color: T.textDim, fontSize: 14, padding: "0 4px", cursor: "pointer" }}>×</button>
+      {isPending && onConfirm && (
+        <button onClick={onConfirm} title="Confirm as-is" style={{ background: "none", border: "none", color: T.gold, fontSize: 13, padding: "0 4px", cursor: "pointer" }}>✓</button>
+      )}
+      <button onClick={onRemove} title="Remove" style={{ background: "none", border: "none", color: T.textDim, fontSize: 14, padding: "0 4px", cursor: "pointer" }}>×</button>
     </div>
   );
 }
@@ -1252,7 +1268,7 @@ function IntakeForm({ products, onAdd, maxTime }) {
 }
 
 // ─── INTAKE LIST (2-column grid with empty state) ─────────────────────────────
-function IntakeList({ events, products, onRemove }) {
+function IntakeList({ events, products, onRemove, onConfirm }) {
   if (events.length === 0) {
     return (
       <div style={{ fontSize: 12, color: T.textDim, padding: "12px 10px", textAlign: "center", background: T.surface2, borderRadius: 4, marginBottom: 12 }}>
@@ -1263,7 +1279,9 @@ function IntakeList({ events, products, onRemove }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, marginBottom: 12 }}>
       {events.map(e => (
-        <IntakeRow key={e.id} event={e} products={products} onRemove={() => onRemove(e.id)} />
+        <IntakeRow key={e.id} event={e} products={products}
+          onRemove={() => onRemove(e.id)}
+          onConfirm={onConfirm ? () => onConfirm(e.id) : undefined} />
       ))}
     </div>
   );
@@ -3080,9 +3098,29 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
     // without preRaceFueling fall through to the default — see migration in
     // PlanTab loader). User can still override on ANALYZE after this.
     setAnalyzePreRaceFueling(race?.plan?.nutritionPlan?.preRaceFueling ?? PRE_RACE_FUELING_DEFAULT_ID);
-    // B-33: restore the persisted "actual fuel log" for this race. Legacy
-    // saves without `analyzeData.actualIntake` fall through to [].
-    setActualIntake(race?.analyzeData?.actualIntake ?? []);
+    // B-33/B-34: restore the persisted "actual fuel log", else seed from the
+    // plan as PENDING entries, else empty.
+    //  1. Saved actual log exists (non-empty) → load untouched. NEVER overwrite
+    //     a rider's saved actuals with a re-seed.
+    //  2. No saved log but the race has a planned intake schedule → seed the
+    //     actual log from the plan, each entry marked `confirmed: false`
+    //     (pending). Fresh ids so remove/confirm work independently of the
+    //     plan. Pending-not-pre-confirmed is deliberate: this feature exists
+    //     for nutrition-model validation; pre-confirming would have the app
+    //     validate the plan against itself.
+    //  3. No saved log, no plan → empty (legacy behavior).
+    const savedLog = race?.analyzeData?.actualIntake;
+    if (Array.isArray(savedLog) && savedLog.length > 0) {
+      setActualIntake(savedLog);
+    } else {
+      const planned = race?.plan?.nutritionPlan?.intakeEvents;
+      if (Array.isArray(planned) && planned.length > 0) {
+        const seedBase = Date.now();
+        setActualIntake(planned.map((e, i) => ({ ...e, id: seedBase + i, confirmed: false })));
+      } else {
+        setActualIntake([]);
+      }
+    }
     if (race?.fit) {
       setFitData(race.fit);
       setFitFile(race.fit.fileName ?? 'Saved FIT');
@@ -5184,8 +5222,13 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
             </div>
           </div>
           <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8 }}>In-Race Fueling</div>
-          <IntakeForm products={products} onAdd={e => setActualIntake(prev => [...prev, e].sort((a, b) => a.time - b.time))} maxTime={fitData?.durationMin || 360} />
-          <IntakeList events={actualIntake} products={products} onRemove={id => setActualIntake(prev => prev.filter(x => x.id !== id))} />
+          {/* B-34: rider-added entries are confirmed actuals (confirmed:true).
+              Only plan-seeded entries arrive pending (confirmed:false). The
+              PLAN-tab onAdd (separate call site) is untouched — no flag there. */}
+          <IntakeForm products={products} onAdd={e => setActualIntake(prev => [...prev, { ...e, confirmed: true }].sort((a, b) => a.time - b.time))} maxTime={fitData?.durationMin || 360} />
+          <IntakeList events={actualIntake} products={products}
+            onRemove={id => setActualIntake(prev => prev.filter(x => x.id !== id))}
+            onConfirm={id => setActualIntake(prev => prev.map(x => x.id === id ? { ...x, confirmed: true } : x))} />
           {fitOverlay.length > 0 && (
             <>
               <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Cumulative Burn vs Intake</div>
@@ -5209,11 +5252,20 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
               )}
             </>
           )}
-          {/* B-33: explicit save for the actual fuel log */}
+          {/* B-33: explicit save for the actual fuel log.
+              B-34: non-blocking hint when plan-seeded entries are still pending.
+              Save is allowed with pending entries (a rider may genuinely not
+              remember) — this is a hint, not a gate. */}
           {(() => {
             const disabled = !selectedRaceId || actualIntake.length === 0;
+            const pendingCount = actualIntake.filter(e => e.confirmed === false).length;
             return (
-              <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end" }}>
+              <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                {pendingCount > 0 && (
+                  <span style={{ fontSize: 11, color: T.gold, flex: "1 1 auto", textAlign: "right" }}>
+                    {pendingCount} pending {pendingCount === 1 ? "entry" : "entries"} from the plan — confirm or correct them for accurate validation data. You can still save.
+                  </span>
+                )}
                 <button
                   className="btn-primary"
                   disabled={disabled}
