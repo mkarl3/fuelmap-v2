@@ -1189,31 +1189,69 @@ function WbalChart({ wbalData, athlete, gpxStats = null, imperial = false, durat
 }
 
 // ─── INTAKE EVENT ROW ─────────────────────────────────────────────────────────
-function IntakeRow({ event, onRemove, onConfirm, products }) {
-  const prod = products.find(p => p.id === event.productId);
+function IntakeRow({ event, onRemove, onConfirm, onEdit, products }) {
   // B-34: pending state is provenance/UI metadata only — strict `=== false`
   // so legacy entries (no flag → undefined) render as confirmed, never pending.
   const isPending = event.confirmed === false;
+
+  // B-34 follow-up: a pending entry (the "confirmation slot") is directly
+  // editable — prominent timestamp input + product + carbs — so the rider
+  // corrects the seeded plan value before confirming. Spans the full grid
+  // width so the inline fields have room and the slot reads as "act on me".
+  if (isPending && onEdit) {
+    const changeProduct = (pid) => {
+      const p = products.find(x => x.id === Number(pid));
+      if (!p) return;
+      onEdit(event.id, {
+        productId: p.id, name: p.name, carbs: p.carbs,
+        sodium: p.sodium, isLiquid: p.isLiquid ?? false,
+      });
+    };
+    return (
+      <div style={{
+        gridColumn: "1 / -1",
+        display: "flex", alignItems: "center", gap: 8, padding: "8px 10px",
+        background: T.surface2, borderRadius: 4, border: `1px dashed ${T.gold}`,
+        flexWrap: "wrap",
+      }}>
+        <span style={{ color: T.gold, fontSize: 10, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase" }}>pending</span>
+        <label style={{ fontSize: 11, color: T.text, display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
+          @
+          <input type="number" min={0} value={event.time}
+            onChange={e => onEdit(event.id, { time: Number(e.target.value) })}
+            style={{ width: 56 }} />
+          min
+          <span style={{ color: T.textMuted, fontFamily: "Barlow Condensed", fontSize: 12 }}>({minsToHHMM(event.time)})</span>
+        </label>
+        <select value={event.productId ?? ""} onChange={e => changeProduct(e.target.value)} style={{ flex: 1, minWidth: 120 }}>
+          {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        <label style={{ fontSize: 11, color: T.text, display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
+          <input type="number" min={0} value={event.carbs}
+            onChange={e => onEdit(event.id, { carbs: Number(e.target.value) })}
+            style={{ width: 54 }} />
+          g
+        </label>
+        {onConfirm && (
+          <button onClick={onConfirm} title="Confirm" style={{ background: "none", border: "none", color: T.gold, fontSize: 14, padding: "0 4px", cursor: "pointer" }}>✓</button>
+        )}
+        <button onClick={onRemove} title="Remove" style={{ background: "none", border: "none", color: T.textDim, fontSize: 14, padding: "0 4px", cursor: "pointer" }}>×</button>
+      </div>
+    );
+  }
+
+  // Confirmed (and PLAN-tab) entries — static display row.
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
       background: T.surface2, borderRadius: 4,
-      // Solid transparent on confirmed keeps row height stable between states.
-      border: isPending ? `1px dashed ${T.gold}` : "1px solid transparent",
+      border: "1px solid transparent", // keeps row height stable vs the dashed pending border
     }}>
       <span style={{ color: T.textMuted, fontSize: 11, fontFamily: "Barlow Condensed", minWidth: 36 }}>
         {minsToHHMM(event.time)}
       </span>
-      <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: isPending ? T.textMuted : T.text }}>
-        {event.name}
-        {isPending && (
-          <span style={{ color: T.gold, fontSize: 10, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.06em", marginLeft: 6, textTransform: "uppercase" }}>pending</span>
-        )}
-      </span>
+      <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.name}</span>
       <span style={{ color: T.gold, fontSize: 12, fontFamily: "Barlow Condensed" }}>{event.carbs}g</span>
-      {isPending && onConfirm && (
-        <button onClick={onConfirm} title="Confirm as-is" style={{ background: "none", border: "none", color: T.gold, fontSize: 13, padding: "0 4px", cursor: "pointer" }}>✓</button>
-      )}
       <button onClick={onRemove} title="Remove" style={{ background: "none", border: "none", color: T.textDim, fontSize: 14, padding: "0 4px", cursor: "pointer" }}>×</button>
     </div>
   );
@@ -1268,7 +1306,7 @@ function IntakeForm({ products, onAdd, maxTime }) {
 }
 
 // ─── INTAKE LIST (2-column grid with empty state) ─────────────────────────────
-function IntakeList({ events, products, onRemove, onConfirm }) {
+function IntakeList({ events, products, onRemove, onConfirm, onEdit }) {
   if (events.length === 0) {
     return (
       <div style={{ fontSize: 12, color: T.textDim, padding: "12px 10px", textAlign: "center", background: T.surface2, borderRadius: 4, marginBottom: 12 }}>
@@ -1281,7 +1319,8 @@ function IntakeList({ events, products, onRemove, onConfirm }) {
       {events.map(e => (
         <IntakeRow key={e.id} event={e} products={products}
           onRemove={() => onRemove(e.id)}
-          onConfirm={onConfirm ? () => onConfirm(e.id) : undefined} />
+          onConfirm={onConfirm ? () => onConfirm(e.id) : undefined}
+          onEdit={onEdit} />
       ))}
     </div>
   );
@@ -5228,7 +5267,8 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
           <IntakeForm products={products} onAdd={e => setActualIntake(prev => [...prev, { ...e, confirmed: true }].sort((a, b) => a.time - b.time))} maxTime={fitData?.durationMin || 360} />
           <IntakeList events={actualIntake} products={products}
             onRemove={id => setActualIntake(prev => prev.filter(x => x.id !== id))}
-            onConfirm={id => setActualIntake(prev => prev.map(x => x.id === id ? { ...x, confirmed: true } : x))} />
+            onConfirm={id => setActualIntake(prev => prev.map(x => x.id === id ? { ...x, confirmed: true } : x))}
+            onEdit={(id, patch) => setActualIntake(prev => prev.map(x => x.id === id ? { ...x, ...patch } : x))} />
           {fitOverlay.length > 0 && (
             <>
               <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Cumulative Burn vs Intake</div>
