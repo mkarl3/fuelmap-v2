@@ -1517,14 +1517,28 @@ function DropZone({ accept, label, onFile, loaded }) {
   const inp = useRef();
 
   const handleFile = (file) => {
-    if (!file) return;
+    // B-17 diag: confirms the input change-event actually reached React.
+    console.log('[B-17] DropZone.handleFile', { accept, name: file?.name, size: file?.size });
+    if (!file) { console.warn('[B-17] handleFile got no file (cancelled?)'); return; }
     const reader = new FileReader();
-    if (accept === ".fit") {
-      reader.readAsArrayBuffer(file);
-      reader.onload = e => onFile(e.target.result, file.name);
-    } else {
-      reader.readAsText(file);
-      reader.onload = e => onFile(e.target.result, file.name);
+    // Assign handlers BEFORE kicking off the read, and surface read errors
+    // (previously a failed read was swallowed silently → "picked a file,
+    // nothing happened, no error" — exactly the B-17 symptom).
+    reader.onload = e => {
+      console.log('[B-17] FileReader.onload fired → calling onFile', { name: file.name });
+      onFile(e.target.result, file.name);
+    };
+    reader.onerror = () => {
+      console.error('[B-17] FileReader.onerror', reader.error);
+      alert(`Could not read "${file.name}": ${reader.error?.message || 'file read failed'}. Try the file again.`);
+    };
+    reader.onabort = () => console.warn('[B-17] FileReader.onabort', file.name);
+    try {
+      if (accept === ".fit") reader.readAsArrayBuffer(file);
+      else reader.readAsText(file);
+    } catch (err) {
+      console.error('[B-17] reader.read* threw synchronously', err);
+      alert(`Could not start reading "${file.name}": ${err.message}`);
     }
   };
 
@@ -3498,6 +3512,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
 
   // When the selected race changes, auto-load stored FIT data if present.
   useEffect(() => {
+    console.log('[B-17] AnalyzeTab selectedRaceId effect FIRED', { selectedRaceId });
     if (!selectedRaceId) {
       setFitSaved(false); setNoPowerToastDismissed(false);
       setAnalyzePreRaceFueling(PRE_RACE_FUELING_DEFAULT_ID);
@@ -3643,6 +3658,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
   };
 
   const handleFIT = async (buffer, name) => {
+    console.log('[B-17] handleFIT ENTER', { name, bytes: buffer?.byteLength, selectedRaceId });
     // B-32: show the loading overlay BEFORE parseFIT or alignment can block.
     // The setTimeout(0) yield is essential — without it the overlay state
     // update and the parseFIT await would chain inside the same task, and
@@ -3652,7 +3668,8 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
     await new Promise(r => setTimeout(r, 0));
     let result = null;
     try { result = await parseFIT(buffer); }
-    catch { result = null; }
+    catch (err) { console.error('[B-17] parseFIT threw', err); result = null; }
+    console.log('[B-17] parseFIT done', { ok: !!result, records: result?.totalRecords, hasGPS: !!result?.firstGPS });
     if (result) {
       setFitData(result);
       setFitFile(name);
@@ -3760,7 +3777,12 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
   // tab interactions) avoids recomputing on every state change. Spatial-index
   // optimization for the cold path is deferred to the perf-focused prompt.
   const alignment = useMemo(() => {
+    console.log('[B-17] alignment useMemo recompute', {
+      fitPts: fitData?.movingGPSPath?.length ?? 0,
+      gpxPts: gpxRouteForAlign?._gpxPts?.length ?? 0,
+    });
     if (!fitData?.movingGPSPath?.length || !gpxRouteForAlign?._gpxPts?.length) return null;
+    const _t0 = performance.now();
     // Backward compat: legacy saved races persisted `_gpxPts` with only
     // `cumDistM` (parseGPX internal name). `alignFitToGpx` reads `distM` per
     // its documented contract. Map cumDistM→distM for any point missing it
@@ -3768,7 +3790,9 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
     // so new saves bypass this mapping cheaply.
     const gpxPts = gpxRouteForAlign._gpxPts.map(p =>
       typeof p.distM === 'number' ? p : { ...p, distM: p.cumDistM ?? 0 });
-    return alignFitToGpx(fitData.movingGPSPath, gpxPts);
+    const _res = alignFitToGpx(fitData.movingGPSPath, gpxPts);
+    console.log(`[B-17] alignFitToGpx finished in ${Math.round(performance.now() - _t0)}ms`);
+    return _res;
   }, [fitData?.movingGPSPath, gpxRouteForAlign?._gpxPts]);
 
   // 4C sub-step 6 — route-distance thirds. Single derivation drives every
@@ -6228,6 +6252,19 @@ export default function App() {
   // Load races from IndexedDB on mount
   useEffect(() => {
     loadAllRaces().then(setRaces).catch(() => {});
+  }, []);
+
+  // B-17 diag: trap anything that would otherwise be silently swallowed
+  // during the FIT-after-save repro (uncaught errors / rejected promises).
+  useEffect(() => {
+    const onErr = (e) => console.error('[B-17] window error', e.message, e.error);
+    const onRej = (e) => console.error('[B-17] unhandledrejection', e.reason);
+    window.addEventListener('error', onErr);
+    window.addEventListener('unhandledrejection', onRej);
+    return () => {
+      window.removeEventListener('error', onErr);
+      window.removeEventListener('unhandledrejection', onRej);
+    };
   }, []);
 
   return (
