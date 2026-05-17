@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useEffect, useMemo } from "react"
 import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ComposedChart, ReferenceLine, ReferenceArea, Customized } from "recharts";
 import { loadAllRaces, saveRace, updateRace, deleteRace, saveActualIntake } from './db.js';
 import { parseFIT, inferHasPower, inferHasHR } from './parsers/fitParser';
+import { fetchRaceWeather, fetchActualWeather, weatherMode, OPEN_METEO_ATTRIBUTION } from './weather/openMeteo.js';
 import {
   powerAtSpeed, speedAtPower, gradeForSlice, rhoFromTemp, bikePhysics, blendedCrr,
   gradeCategory, carbOxidationRate, recommendIntakeRate, computeZoneDist,
@@ -344,12 +345,17 @@ function parseGPX(xmlText) {
 // course/judgment input, kept as a plain user-only scalar; auto-fill never
 // touches it. `range` (low/high) is reference metadata for sliders; wind
 // direction carries `confidence` (0–1, circular consistency) instead.
+// `source: 'default'` is the pre-fetch sentinel — distinguishes "untouched
+// default" from "user explicitly edited" (source:'user'). The merge rule
+// (Slice C) preserves only 'user' fields on re-fetch; 'default'/'forecast'/
+// 'normal' are replaceable. Legacy migration tags 'user' (those values were
+// genuinely hand-entered pre-B-35 and must survive).
 function defaultWeatherContext() {
   return {
-    tempC:       { value: null, source: 'user', range: null },
-    precipPct:   { value: null, source: 'user', range: null },
-    windSpeedMs: { value: 0,    source: 'user', range: null },
-    windDirDeg:  { value: 270,  source: 'user', confidence: null },
+    tempC:       { value: null, source: 'default', range: null },
+    precipPct:   { value: null, source: 'default', range: null },
+    windSpeedMs: { value: 0,    source: 'default', range: null },
+    windDirDeg:  { value: 270,  source: 'default', confidence: null },
     windEff:     30,
   };
 }
@@ -367,6 +373,19 @@ function migrateWeather(c) {
     windDirDeg:  { value: c.windDirDeg ?? 270, source: 'user', confidence: null },
     windEff:     typeof c.windEff === 'number' ? c.windEff : 30,
   };
+}
+
+// B-35 Slice C: merge a fetched weather result into the structured context
+// WITHOUT clobbering fields the user explicitly edited (source:'user').
+// 'default'/'forecast'/'normal' fields are replaceable; windEff is a
+// course/judgment scalar and is never auto-filled.
+function mergeFetchedWeather(prev, fetched) {
+  const next = { ...prev };
+  for (const k of ['tempC', 'windSpeedMs', 'windDirDeg', 'precipPct']) {
+    if (prev[k]?.source === 'user') continue; // preserve manual edits
+    if (fetched[k]) next[k] = fetched[k];
+  }
+  return next;
 }
 
 // Derived flat read-model for physics/consumer code. Keeps the math untouched:
@@ -391,6 +410,114 @@ function degToCompass(deg) {
 function minsToHHMM(mins) {
   const h = Math.floor(mins / 60), m = Math.round(mins % 60);
   return `${h}:${String(m).padStart(2, "0")}`;
+}
+
+// B-35 Slice C: understated provenance label for a weather field. Data-
+// integrity requirement — a forecast and a 10-year normal are very different
+// trust levels and the user must be able to tell them apart.
+function weatherSourceLabel(field, raceDate) {
+  const src = field?.source;
+  if (src === 'user')   return 'you set this';
+  if (src === 'actual') return 'actual (from ride)';
+  if (src === 'forecast') return raceDate ? `forecast for ${raceDate}` : 'forecast';
+  if (src === 'normal') {
+    if (raceDate) {
+      const d = new Date(raceDate + 'T00:00:00');
+      const mon = d.toLocaleString('en-US', { month: 'long' });
+      const day = d.getDate();
+      const part = day <= 10 ? 'early' : day <= 20 ? 'mid' : 'late';
+      return `typical for ${part} ${mon}`;
+    }
+    return 'typical (10-yr normal)';
+  }
+  return '';
+}
+
+// B-35 Slice C: understated per-field provenance + reset-to-fetched. Required
+// (data integrity), not decoration — present if the user looks.
+function WeatherFieldMeta({ field, raceDate, onReset }) {
+  const label = weatherSourceLabel(field, raceDate);
+  if (!label) return null;
+  const isUser = field?.source === 'user';
+  return (
+    <div style={{ fontSize: 10, color: T.textDim, marginTop: 3, display: 'flex', alignItems: 'center', gap: 8 }}>
+      <span>{label}</span>
+      {isUser && onReset && (
+        <button onClick={onReset} title="Reset to fetched value"
+          style={{ background: 'none', border: 'none', color: T.blue, cursor: 'pointer', fontSize: 10, padding: 0 }}>
+          ↺ reset
+        </button>
+      )}
+    </div>
+  );
+}
+
+// B-35 Slice C: draggable wind-direction compass. Needle = wind-from bearing.
+// Wedge behind the needle encodes directional confidence (Piece 3): wide =
+// variable/low-confidence, narrow = reliable. confidence === null (forecast
+// single-day, no distribution) → no wedge. Dragging the needle → onChange(deg)
+// (caller flips the field to source:'user').
+function DraggableCompass({ value = 270, confidence = null, onChange, size = 132 }) {
+  const ref = useRef(null);
+  const c = size / 2;
+  const r = c - 18;
+  const toXY = (deg, rad) => {
+    const t = (deg * Math.PI) / 180;
+    return { x: c + rad * Math.sin(t), y: c - rad * Math.cos(t) };
+  };
+  const tip = toXY(value, r);
+
+  // confidence 1 → ±10° wedge; confidence 0 → ±90°. null → no wedge.
+  const half = confidence == null ? null : 10 + (1 - confidence) * 80;
+  let wedgePath = null;
+  if (half != null) {
+    const a = toXY(value - half, r);
+    const b = toXY(value + half, r);
+    const large = half > 90 ? 1 : 0;
+    wedgePath = `M ${c} ${c} L ${a.x.toFixed(1)} ${a.y.toFixed(1)} `
+      + `A ${r} ${r} 0 ${large} 1 ${b.x.toFixed(1)} ${b.y.toFixed(1)} Z`;
+  }
+
+  const setFromPointer = (e) => {
+    const el = ref.current;
+    if (!el || !onChange) return;
+    const rect = el.getBoundingClientRect();
+    const px = e.clientX - rect.left - c;
+    const py = e.clientY - rect.top - c;
+    let deg = (Math.atan2(px, -py) * 180) / Math.PI;
+    if (deg < 0) deg += 360;
+    onChange(Math.round(deg) % 360);
+  };
+  const onDown = (e) => {
+    e.preventDefault();
+    setFromPointer(e);
+    const move = (ev) => setFromPointer(ev);
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  return (
+    <svg ref={ref} width={size} height={size} onPointerDown={onDown}
+      style={{ cursor: onChange ? 'grab' : 'default', touchAction: 'none', userSelect: 'none' }}>
+      <circle cx={c} cy={c} r={r} fill={T.surface2} stroke={T.border} strokeWidth={1} />
+      {wedgePath && <path d={wedgePath} fill="rgba(0,212,255,0.14)" stroke="none" />}
+      {[["N",0],["E",90],["S",180],["W",270]].map(([lbl, deg]) => {
+        const p = toXY(deg, r + 9);
+        return (
+          <text key={lbl} x={p.x} y={p.y} fill={T.textDim} fontSize={10}
+            textAnchor="middle" dominantBaseline="central"
+            fontFamily="Barlow Condensed">{lbl}</text>
+        );
+      })}
+      <line x1={c} y1={c} x2={tip.x} y2={tip.y} stroke={T.blue} strokeWidth={2.5} strokeLinecap="round" />
+      <circle cx={tip.x} cy={tip.y} r={4} fill={T.blue} />
+      <circle cx={c} cy={c} r={3} fill={T.textMuted} />
+    </svg>
+  );
 }
 
 // ─── DEFAULT DATA ─────────────────────────────────────────────────────────────
@@ -1915,10 +2042,19 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   // start time refines forecast hour / morning-vs-afternoon historical lean.
   const [raceDate, setRaceDate] = useState("");       // 'YYYY-MM-DD' or ''
   const [raceStartTime, setRaceStartTime] = useState(""); // 'HH:MM' or ''
+  // B-35 Slice C: fetch status + last-fetched stash (for per-field reset).
+  const [weatherFetch, setWeatherFetch] = useState({ status: 'idle', error: '' });
+  const [fetchedWeather, setFetchedWeather] = useState(null);
   // Per-field user edit: writes value and flips provenance to 'user' so a
   // later re-fetch never clobbers a manual edit.
   const setWeatherField = (key, value) =>
     setWeatherContext(w => ({ ...w, [key]: { ...w[key], value, source: 'user' } }));
+  const patchWeatherField = (key, patch) =>
+    setWeatherContext(w => ({ ...w, [key]: { ...w[key], ...patch, source: 'user' } }));
+  // Per-field reset: restore a user-edited field to the last fetched value
+  // so a source:'user' field isn't frozen forever.
+  const resetWeatherField = (key) =>
+    fetchedWeather?.[key] && setWeatherContext(w => ({ ...w, [key]: fetchedWeather[key] }));
   const [goalTimeMin, setGoalTimeMin] = useState(240);
   const [numSegments, setNumSegments] = useState(3);
   const [segments, setSegments] = useState([]);
@@ -1973,6 +2109,40 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   // Note: buildPowerStream uses per-block bearings from gpxStats.courseBearings
   // Air density from temperature (falls back to standard if not set)
   const rhoActual = rhoFromTemp(wxFlat.tempC);
+
+  // B-35 Slice C: route location for weather = GPX midpoint (better than the
+  // start for a long route). null until a GPX with coords is loaded.
+  const routeLatLon = (() => {
+    const pts = gpxStats?._gpxPts;
+    if (!pts || pts.length === 0) return null;
+    const mid = pts[Math.floor(pts.length / 2)];
+    return (Number.isFinite(mid?.lat) && Number.isFinite(mid?.lon))
+      ? { lat: mid.lat, lon: mid.lon } : null;
+  })();
+
+  // B-35 Slice C: fetch on race-date / start-time / route change. A monotonic
+  // request id drops superseded responses (user changing the date twice
+  // quickly must not have the earlier response applied last). On failure the
+  // fields stay as-is (manual entry remains available) and a non-blocking
+  // notice + retry is surfaced — never silent.
+  const weatherReqIdRef = useRef(0);
+  const runWeatherFetch = useCallback(() => {
+    if (!raceDate || !routeLatLon) return;
+    const id = ++weatherReqIdRef.current;
+    setWeatherFetch({ status: 'loading', error: '' });
+    fetchRaceWeather({ lat: routeLatLon.lat, lon: routeLatLon.lon, dateISO: raceDate, startTime: raceStartTime })
+      .then(res => {
+        if (id !== weatherReqIdRef.current) return; // superseded by a newer request
+        setFetchedWeather(res);
+        setWeatherContext(prev => mergeFetchedWeather(prev, res));
+        setWeatherFetch({ status: 'done', error: '' });
+      })
+      .catch(err => {
+        if (id !== weatherReqIdRef.current) return;
+        setWeatherFetch({ status: 'error', error: err.message || 'Weather fetch failed' });
+      });
+  }, [raceDate, raceStartTime, routeLatLon?.lat, routeLatLon?.lon]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { runWeatherFetch(); }, [runWeatherFetch]);
 
   const computePlan = () => {
     try {
@@ -2451,101 +2621,187 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         )}
       </div>
 
-      {/* Race Conditions — B-35 Slice A: structured weather state + race
-          date/time inputs. Auto-fill (fetch + sliders + compass + source
-          indicators) lands in Slices B–D; inputs here stay manual for now,
-          rewired onto the structured {value, source} shape. */}
-      <div className="card">
-        <div className="card-header">Race Conditions</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
-          <div>
-            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-              Race Date
-              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>drives weather auto-fill (coming)</span>
-            </label>
-            <input type="date" value={raceDate} onChange={e => setRaceDate(e.target.value)} style={{ width: "100%" }} />
-          </div>
-          <div>
-            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-              Start Time
-              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>optional — refines forecast hour</span>
-            </label>
-            <input type="time" value={raceStartTime} onChange={e => setRaceStartTime(e.target.value)} style={{ width: "100%" }} />
-          </div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div>
-            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-              Temp ({imperial ? "°F" : "°C"})
-              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>affects air density</span>
-            </label>
-            <input type="number" step={1} placeholder="e.g. 20"
-              value={weatherContext.tempC.value === null ? "" : (imperial ? Math.round(weatherContext.tempC.value * 9/5 + 32) : weatherContext.tempC.value)}
-              onChange={e => {
-                const v = e.target.value === "" ? null : Number(e.target.value);
-                setWeatherField('tempC', imperial && v !== null ? Math.round((v - 32) * 5/9 * 10)/10 : v);
-              }}
-              style={{ width: "100%" }} />
-          </div>
-          <div>
-            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-              Precip Chance (%)
-              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>informational</span>
-            </label>
-            <input type="number" min={0} max={100} step={5} placeholder="e.g. 20"
-              value={weatherContext.precipPct.value === null ? "" : weatherContext.precipPct.value}
-              onChange={e => setWeatherField('precipPct', e.target.value === "" ? null : Math.max(0, Math.min(100, Number(e.target.value))))}
-              style={{ width: "100%" }} />
-          </div>
-          <div>
-            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-              Wind Speed ({imperial ? "mph" : "m/s"})
-              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>affects drag</span>
-            </label>
-            <input type="number" min={0} step={1} placeholder="0"
-              value={weatherContext.windSpeedMs.value === 0 ? "" : (imperial ? Math.round(weatherContext.windSpeedMs.value * 2.237 * 10)/10 : weatherContext.windSpeedMs.value)}
-              onChange={e => {
-                const v = e.target.value === "" ? 0 : Number(e.target.value);
-                setWeatherField('windSpeedMs', imperial ? Math.round(v / 2.237 * 100)/100 : v);
-              }}
-              style={{ width: "100%" }} />
-          </div>
-          <div>
-            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-              Wind From
-            </label>
-            <select
-              value={String(weatherContext.windDirDeg.value)}
-              onChange={e => setWeatherField('windDirDeg', Number(e.target.value))}
-              style={{ width: "100%" }}>
-              {[["N",0],["NNE",22],["NE",45],["ENE",67],["E",90],["ESE",112],["SE",135],["SSE",157],
-                ["S",180],["SSW",202],["SW",225],["WSW",247],["W",270],["WNW",292],["NW",315],["NNW",337]
-              ].map(([label, deg]) => (
-                <option key={deg} value={String(deg)}>{label} ({deg}°)</option>
-              ))}
-            </select>
-          </div>
-          <div style={{ gridColumn: "1 / -1" }}>
-            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-              Wind Effectiveness
-              <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>course/judgment input — never auto-filled</span>
-            </label>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <input type="range" min={10} max={75} step={5}
-                value={weatherContext.windEff}
-                onChange={e => setWeatherContext(w => ({ ...w, windEff: Number(e.target.value) }))}
-                style={{ flex: 1 }} />
-              <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 14, minWidth: 36, color: weatherContext.windEff > 50 ? T.red : weatherContext.windEff > 25 ? T.gold : T.green }}>
-                {weatherContext.windEff}%
+      {/* Race Conditions — B-35 Slice C: weather auto-fills from race date +
+          route location (Open-Meteo). Sliders bounded by typical range;
+          draggable confidence compass; per-field provenance + reset; manual
+          override always available; non-blocking failure notice + retry. */}
+      {(() => {
+        const wc = weatherContext;
+        const mode = raceDate ? weatherMode(raceDate) : null;
+        const fetching = weatherFetch.status === 'loading';
+        const failed = weatherFetch.status === 'error';
+        // Temp slider bounds (stored °C; displayed per unit pref).
+        const toDispT = (c) => imperial ? Math.round(c * 9/5 + 32) : Math.round(c * 10)/10;
+        const fromDispT = (d) => imperial ? Math.round((d - 32) * 5/9 * 10)/10 : d;
+        const toDispW = (ms) => imperial ? Math.round(ms * 2.237 * 10)/10 : Math.round(ms * 10)/10;
+        const fromDispW = (d) => imperial ? Math.round(d / 2.237 * 100)/100 : d;
+        return (
+        <div className="card">
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+            <div className="card-header" style={{ margin: 0 }}>Race Conditions</div>
+            {fetching && <span style={{ fontSize: 11, color: T.blue }}>Fetching weather…</span>}
+            {mode && !fetching && !failed && (
+              <span style={{ fontSize: 11, color: T.textDim }}>
+                {mode === 'forecast' ? 'Forecast' : '10-yr typical'}
               </span>
+            )}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <div>
+              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+                Race Date
+                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>auto-fills weather</span>
+              </label>
+              <input type="date" value={raceDate} onChange={e => setRaceDate(e.target.value)} style={{ width: "100%" }} />
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: T.textDim, marginTop: 2 }}>
-              <span>10% Gusty / Sheltered</span><span>30% Typical / Partial Exposure</span><span>75% Steady &amp; Full Exposure</span>
+            <div>
+              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+                Start Time
+                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>optional — refines hour</span>
+              </label>
+              <input type="time" value={raceStartTime} onChange={e => setRaceStartTime(e.target.value)} style={{ width: "100%" }} />
             </div>
           </div>
+          {raceDate && !routeLatLon && (
+            <div className="alert alert-info" style={{ marginBottom: 12 }}>
+              Load a GPX route to auto-fill weather for the race location. Manual entry works without it.
+            </div>
+          )}
+          {failed && (
+            <div className="alert alert-warn" style={{ marginBottom: 12, justifyContent: "space-between", alignItems: "flex-start" }}>
+              <span>⚠ Weather fetch failed: {weatherFetch.error}. Enter values manually below, or retry.</span>
+              <button className="btn-secondary" style={{ marginLeft: 8 }} onClick={runWeatherFetch}>Retry</button>
+            </div>
+          )}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            {/* Temp */}
+            <div>
+              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+                Temp ({imperial ? "°F" : "°C"})
+                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>affects air density</span>
+              </label>
+              {wc.tempC.range && wc.tempC.value !== null ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <input type="range"
+                    min={toDispT(wc.tempC.range.low)} max={toDispT(wc.tempC.range.high)}
+                    step={imperial ? 1 : 0.5}
+                    value={toDispT(wc.tempC.value)}
+                    onChange={e => setWeatherField('tempC', fromDispT(Number(e.target.value)))}
+                    style={{ flex: 1 }} />
+                  <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 14, minWidth: 42, textAlign: "right" }}>
+                    {toDispT(wc.tempC.value)}{imperial ? "°F" : "°C"}
+                  </span>
+                </div>
+              ) : (
+                <input type="number" step={1} placeholder="e.g. 20"
+                  value={wc.tempC.value === null ? "" : toDispT(wc.tempC.value)}
+                  onChange={e => setWeatherField('tempC', e.target.value === "" ? null : fromDispT(Number(e.target.value)))}
+                  style={{ width: "100%" }} />
+              )}
+              <WeatherFieldMeta field={wc.tempC} raceDate={raceDate} onReset={() => resetWeatherField('tempC')} />
+            </div>
+            {/* Precip — probability is reference, amount is adjustable */}
+            <div>
+              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+                Precip
+                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>informational</span>
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 12, color: T.textMuted, whiteSpace: "nowrap" }}>
+                  {wc.precipPct.value === null ? "—" : `${wc.precipPct.value}% chance`}
+                </span>
+                <input type="number" min={0} step={0.5} placeholder="mm"
+                  value={wc.precipPct.amountMm == null ? "" : wc.precipPct.amountMm}
+                  onChange={e => patchWeatherField('precipPct', { amountMm: e.target.value === "" ? null : Math.max(0, Number(e.target.value)) })}
+                  style={{ width: 70 }} />
+                <span style={{ fontSize: 11, color: T.textDim }}>mm</span>
+              </div>
+              <WeatherFieldMeta field={wc.precipPct} raceDate={raceDate} onReset={() => resetWeatherField('precipPct')} />
+            </div>
+            {/* Wind speed */}
+            <div>
+              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+                Wind Speed ({imperial ? "mph" : "m/s"})
+                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>affects drag</span>
+              </label>
+              {wc.windSpeedMs.range ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <input type="range"
+                    min={toDispW(wc.windSpeedMs.range.low)} max={toDispW(wc.windSpeedMs.range.high)}
+                    step={imperial ? 0.5 : 0.1}
+                    value={toDispW(wc.windSpeedMs.value)}
+                    onChange={e => setWeatherField('windSpeedMs', fromDispW(Number(e.target.value)))}
+                    style={{ flex: 1 }} />
+                  <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 14, minWidth: 48, textAlign: "right" }}>
+                    {toDispW(wc.windSpeedMs.value)}{imperial ? "mph" : "m/s"}
+                  </span>
+                </div>
+              ) : (
+                <input type="number" min={0} step={1} placeholder="0"
+                  value={wc.windSpeedMs.value === 0 ? "" : toDispW(wc.windSpeedMs.value)}
+                  onChange={e => setWeatherField('windSpeedMs', e.target.value === "" ? 0 : fromDispW(Number(e.target.value)))}
+                  style={{ width: "100%" }} />
+              )}
+              <WeatherFieldMeta field={wc.windSpeedMs} raceDate={raceDate} onReset={() => resetWeatherField('windSpeedMs')} />
+            </div>
+            {/* Wind direction — draggable confidence compass */}
+            <div>
+              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+                Wind From
+                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>drag the needle</span>
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <DraggableCompass
+                  value={wc.windDirDeg.value}
+                  confidence={wc.windDirDeg.confidence}
+                  onChange={deg => setWeatherField('windDirDeg', deg)}
+                  size={120} />
+                <div>
+                  <div style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 16 }}>
+                    {degToCompass(wc.windDirDeg.value)} <span style={{ color: T.textMuted, fontSize: 13 }}>({Math.round(wc.windDirDeg.value)}°)</span>
+                  </div>
+                  {wc.windDirDeg.confidence != null && (
+                    <div style={{ fontSize: 10, color: T.textDim, marginTop: 2 }}>
+                      {wc.windDirDeg.confidence >= 0.66 ? "Reliable direction"
+                        : wc.windDirDeg.confidence >= 0.33 ? "Somewhat variable"
+                        : "Highly variable"} ({Math.round(wc.windDirDeg.confidence * 100)}%)
+                    </div>
+                  )}
+                  <WeatherFieldMeta field={wc.windDirDeg} raceDate={raceDate} onReset={() => resetWeatherField('windDirDeg')} />
+                </div>
+              </div>
+            </div>
+            <div style={{ gridColumn: "1 / -1" }}>
+              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+                Wind Effectiveness
+                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>course/judgment input — never auto-filled</span>
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <input type="range" min={10} max={75} step={5}
+                  value={wc.windEff}
+                  onChange={e => setWeatherContext(w => ({ ...w, windEff: Number(e.target.value) }))}
+                  style={{ flex: 1 }} />
+                <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 14, minWidth: 36, color: wc.windEff > 50 ? T.red : wc.windEff > 25 ? T.gold : T.green }}>
+                  {wc.windEff}%
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: T.textDim, marginTop: 2 }}>
+                <span>10% Gusty / Sheltered</span><span>30% Typical / Partial Exposure</span><span>75% Steady &amp; Full Exposure</span>
+              </div>
+            </div>
+          </div>
+          <div style={{ fontSize: 10, color: T.textDim, marginTop: 12 }}>
+            Weather data by <a href={OPEN_METEO_ATTRIBUTION.url} target="_blank" rel="noreferrer" style={{ color: T.textMuted }}>Open-Meteo.com</a> ·{" "}
+            <a href={OPEN_METEO_ATTRIBUTION.licenseUrl} target="_blank" rel="noreferrer" style={{ color: T.textMuted }}>CC BY 4.0</a>
+          </div>
         </div>
-        {/* Live summary — only shown when something is set */}
-        {(wxFlat.tempC !== null || wxFlat.precipPct !== null || wxFlat.windSpeedMs > 0) && (
+        );
+      })()}
+      {/* Legacy weather summary card — only shown when something is set. */}
+      {(wxFlat.tempC !== null || wxFlat.precipPct !== null || wxFlat.windSpeedMs > 0) && (
+      <div className="card">
+        <div className="card-header">Conditions Summary</div>
+        {(
           <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
             {wxFlat.tempC !== null && (
               <span style={{ fontSize: 12, background: T.surface2, padding: "4px 10px", borderRadius: 3, fontFamily: "Barlow Condensed" }}>
@@ -2577,6 +2833,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           </div>
         )}
       </div>
+      )}
 
       {/* Step 2 — Pacing Strategy */}
       <div className="card">
@@ -3197,6 +3454,9 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
   // alignFitToGpx useMemo blocks (5–9s on typical fixtures). Cleared in the
   // same render that paints results.
   const [fitProcessing, setFitProcessing] = useState(false);
+  // B-35 Slice D: realized weather for the ride day (display-only, source:'actual').
+  const [actualWeather, setActualWeather] = useState(null);
+  const [actualWxStatus, setActualWxStatus] = useState({ status: 'idle', error: '' });
 
   // Derived: does the loaded FIT have power / HR? Falls back to inferring from
   // the data shape, so old saved races without explicit hasPower/hasHR flags
@@ -3389,6 +3649,43 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
 
   const fitOverlay = fitMinStream.length
     ? buildNutritionOverlay(fitMinStream, actualIntake, athlete, fuelingScale(analyzePreRaceFueling), 1) : [];
+
+  // B-35 Slice D: ride date + location from the FIT (no clean ride-date field
+  // exists — derive from lap start or first GPS timestamp). UTC date/hour is
+  // a deliberate simplification; Open-Meteo `timezone=auto` localizes the
+  // returned hourly data to the ride location regardless.
+  const rideWxKey = (() => {
+    const loc = fitData?.firstGPS;
+    if (!loc || !Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)) return null;
+    const ms = fitData?.laps?.[0]?.startTimeMs ?? fitData?.fullGPSPath?.[0]?.timestamp ?? null;
+    if (!Number.isFinite(ms)) return null;
+    const d = new Date(ms);
+    const dateISO = d.toISOString().slice(0, 10);
+    const startTime = `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+    return { lat: loc.lat, lon: loc.lon, dateISO, startTime };
+  })();
+
+  const actualWxReqRef = useRef(0);
+  const runActualWxFetch = useCallback(() => {
+    if (!rideWxKey) return;
+    const id = ++actualWxReqRef.current;
+    setActualWxStatus({ status: 'loading', error: '' });
+    fetchActualWeather(rideWxKey)
+      .then(res => {
+        if (id !== actualWxReqRef.current) return;
+        setActualWeather(res);
+        setActualWxStatus({ status: 'done', error: '' });
+      })
+      .catch(err => {
+        if (id !== actualWxReqRef.current) return;
+        setActualWeather(null);
+        setActualWxStatus({ status: 'error', error: err.message || 'Realized weather unavailable' });
+      });
+  }, [rideWxKey?.lat, rideWxKey?.lon, rideWxKey?.dateISO, rideWxKey?.startTime]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!rideWxKey) { setActualWeather(null); setActualWxStatus({ status: 'idle', error: '' }); return; }
+    runActualWxFetch();
+  }, [runActualWxFetch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // CC#8 (Prompt 4B Step 5): per-second FIT-to-GPX alignment. One pass; both
   // bucketByTerrain and perClimbStats consume the same alignment array. Off-
@@ -3832,6 +4129,75 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
             <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>Power Zone Distribution</div>
             <ZoneComparisonBar actualStream={fitMinStream} plannedStream={null} ftp={athlete.ftp} />
           </div>
+        </div>
+      )}
+
+      {/* B-35 Slice D: realized weather for the ride day — display-only,
+          source:'actual'. No plan regen, no physics. From the FIT's date +
+          GPS via Open-Meteo /v1/archive for that specific day. */}
+      {rideWxKey && (
+        <div className="card">
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+            <div className="card-header" style={{ margin: 0 }}>Actual Conditions</div>
+            <span style={{ fontSize: 11, color: T.textDim }}>
+              {actualWxStatus.status === 'loading' ? 'Loading…' : `realized · ${rideWxKey.dateISO}`}
+            </span>
+          </div>
+          {actualWxStatus.status === 'error' && (
+            <div className="alert alert-warn" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+              <span>⚠ Couldn't load realized weather: {actualWxStatus.error}.</span>
+              <button className="btn-secondary" style={{ marginLeft: 8 }} onClick={runActualWxFetch}>Retry</button>
+            </div>
+          )}
+          {actualWeather && (
+            <>
+              <div style={{ display: "flex", gap: 24, alignItems: "center", flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Temp</div>
+                  <div style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 18 }}>
+                    {actualWeather.tempC.value == null ? "—"
+                      : `${imperial ? Math.round(actualWeather.tempC.value * 9/5 + 32) : actualWeather.tempC.value}${imperial ? "°F" : "°C"}`}
+                  </div>
+                  {actualWeather.tempC.range && (
+                    <div style={{ fontSize: 10, color: T.textDim }}>
+                      {imperial
+                        ? `${Math.round(actualWeather.tempC.range.low*9/5+32)}–${Math.round(actualWeather.tempC.range.high*9/5+32)}°F day range`
+                        : `${actualWeather.tempC.range.low}–${actualWeather.tempC.range.high}°C day range`}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Wind</div>
+                  <div style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 18 }}>
+                    {actualWeather.windSpeedMs.value == null ? "—"
+                      : `${imperial ? Math.round(actualWeather.windSpeedMs.value * 2.237 * 10)/10 : actualWeather.windSpeedMs.value}${imperial ? "mph" : "m/s"}`}
+                    <span style={{ color: T.textMuted, fontSize: 13, marginLeft: 6 }}>from {degToCompass(actualWeather.windDirDeg.value)}</span>
+                  </div>
+                  {actualWeather.windDirDeg.confidence != null && (
+                    <div style={{ fontSize: 10, color: T.textDim }}>
+                      {actualWeather.windDirDeg.confidence >= 0.66 ? "steady"
+                        : actualWeather.windDirDeg.confidence >= 0.33 ? "shifting" : "highly variable"} that day
+                    </div>
+                  )}
+                </div>
+                <DraggableCompass value={actualWeather.windDirDeg.value} confidence={actualWeather.windDirDeg.confidence} size={104} />
+                <div>
+                  <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Precip</div>
+                  <div style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 18, color: actualWeather.precipPct.value >= 100 ? T.gold : T.text }}>
+                    {actualWeather.precipPct.amountMm == null ? "—" : `${actualWeather.precipPct.amountMm} mm`}
+                  </div>
+                  <div style={{ fontSize: 10, color: T.textDim }}>
+                    {actualWeather.precipPct.value >= 100 ? "measurable rain" : "dry"}
+                  </div>
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: T.textDim, marginTop: 12 }}>
+                Realized conditions · Weather data by{" "}
+                <a href={OPEN_METEO_ATTRIBUTION.url} target="_blank" rel="noreferrer" style={{ color: T.textMuted }}>Open-Meteo.com</a> ·{" "}
+                <a href={OPEN_METEO_ATTRIBUTION.licenseUrl} target="_blank" rel="noreferrer" style={{ color: T.textMuted }}>CC BY 4.0</a>
+              </div>
+            </>
+          )}
         </div>
       )}
 
