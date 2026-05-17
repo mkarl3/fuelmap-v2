@@ -436,13 +436,16 @@ function weatherSourceLabel(field, raceDate) {
 // B-35 Slice C: understated per-field provenance + reset-to-fetched. Required
 // (data integrity), not decoration — present if the user looks.
 function WeatherFieldMeta({ field, raceDate, onReset }) {
-  const label = weatherSourceLabel(field, raceDate);
-  if (!label) return null;
-  const isUser = field?.source === 'user';
+  // The shared baseline provenance ("typical for mid May" / "forecast for …")
+  // is shown ONCE at the card level. Per-field meta only surfaces when this
+  // field DIVERGES from that baseline — i.e. the user manually overrode it —
+  // so the user can tell which fields they touched and reset them. Data
+  // integrity preserved without the N× repetition.
+  if (field?.source !== 'user') return null;
   return (
     <div style={{ fontSize: 10, color: T.textDim, marginTop: 3, display: 'flex', alignItems: 'center', gap: 8 }}>
-      <span>{label}</span>
-      {isUser && onReset && (
+      <span>{weatherSourceLabel(field, raceDate)}</span>
+      {onReset && (
         <button onClick={onReset} title="Reset to fetched value"
           style={{ background: 'none', border: 'none', color: T.blue, cursor: 'pointer', fontSize: 10, padding: 0 }}>
           ↺ reset
@@ -452,11 +455,13 @@ function WeatherFieldMeta({ field, raceDate, onReset }) {
   );
 }
 
-// B-35 Slice C: draggable wind-direction compass. Needle = wind-from bearing.
+// B-35 Slice C: draggable wind-direction compass. DATA is wind-FROM bearing
+// (physics convention, unchanged). The NEEDLE points where the wind is
+// HEADING (= from + 180°) so the arrow reads as "the way the wind pushes you".
 // Wedge behind the needle encodes directional confidence (Piece 3): wide =
 // variable/low-confidence, narrow = reliable. confidence === null (forecast
-// single-day, no distribution) → no wedge. Dragging the needle → onChange(deg)
-// (caller flips the field to source:'user').
+// single-day, no distribution) → no wedge. Dragging converts the pointer's
+// heading bearing back to wind-from before onChange (caller flips source:'user').
 function DraggableCompass({ value = 270, confidence = null, onChange, size = 132 }) {
   const ref = useRef(null);
   const c = size / 2;
@@ -465,14 +470,22 @@ function DraggableCompass({ value = 270, confidence = null, onChange, size = 132
     const t = (deg * Math.PI) / 180;
     return { x: c + rad * Math.sin(t), y: c - rad * Math.cos(t) };
   };
-  const tip = toXY(value, r);
+  const heading = (value + 180) % 360;       // where the wind is going
+  const tip = toXY(heading, r);
+  // Arrowhead triangle at the tip, pointing outward along the needle.
+  const tRad = (heading * Math.PI) / 180;
+  const px = Math.cos(tRad), py = Math.sin(tRad); // unit perpendicular to needle
+  const base = toXY(heading, r - 12);
+  const ahL = { x: base.x + px * 5, y: base.y + py * 5 };
+  const ahR = { x: base.x - px * 5, y: base.y - py * 5 };
 
   // confidence 1 → ±10° wedge; confidence 0 → ±90°. null → no wedge.
+  // Wedge is centered on the heading too, for visual coherence with the needle.
   const half = confidence == null ? null : 10 + (1 - confidence) * 80;
   let wedgePath = null;
   if (half != null) {
-    const a = toXY(value - half, r);
-    const b = toXY(value + half, r);
+    const a = toXY(heading - half, r);
+    const b = toXY(heading + half, r);
     const large = half > 90 ? 1 : 0;
     wedgePath = `M ${c} ${c} L ${a.x.toFixed(1)} ${a.y.toFixed(1)} `
       + `A ${r} ${r} 0 ${large} 1 ${b.x.toFixed(1)} ${b.y.toFixed(1)} Z`;
@@ -482,11 +495,12 @@ function DraggableCompass({ value = 270, confidence = null, onChange, size = 132
     const el = ref.current;
     if (!el || !onChange) return;
     const rect = el.getBoundingClientRect();
-    const px = e.clientX - rect.left - c;
-    const py = e.clientY - rect.top - c;
-    let deg = (Math.atan2(px, -py) * 180) / Math.PI;
-    if (deg < 0) deg += 360;
-    onChange(Math.round(deg) % 360);
+    const dx = e.clientX - rect.left - c;
+    const dy = e.clientY - rect.top - c;
+    let headingDeg = (Math.atan2(dx, -dy) * 180) / Math.PI;
+    if (headingDeg < 0) headingDeg += 360;
+    // Pointer indicates where the wind heads; store the wind-FROM bearing.
+    onChange((Math.round(headingDeg) + 180) % 360);
   };
   const onDown = (e) => {
     e.preventDefault();
@@ -513,8 +527,8 @@ function DraggableCompass({ value = 270, confidence = null, onChange, size = 132
             fontFamily="Barlow Condensed">{lbl}</text>
         );
       })}
-      <line x1={c} y1={c} x2={tip.x} y2={tip.y} stroke={T.blue} strokeWidth={2.5} strokeLinecap="round" />
-      <circle cx={tip.x} cy={tip.y} r={4} fill={T.blue} />
+      <line x1={c} y1={c} x2={base.x} y2={base.y} stroke={T.blue} strokeWidth={2.5} strokeLinecap="round" />
+      <polygon points={`${tip.x.toFixed(1)},${tip.y.toFixed(1)} ${ahL.x.toFixed(1)},${ahL.y.toFixed(1)} ${ahR.x.toFixed(1)},${ahR.y.toFixed(1)}`} fill={T.blue} />
       <circle cx={c} cy={c} r={3} fill={T.textMuted} />
     </svg>
   );
@@ -565,7 +579,7 @@ const css = `
   input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; background: ${T.border}; border-radius: 2px; outline: none; cursor: pointer; }
   input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; background: ${T.blue}; border-radius: 50%; cursor: pointer; }
   input[type=range]::-webkit-slider-thumb:hover { background: #6db3ff; }
-  select, input[type=text], input[type=number] { background: ${T.surface2}; border: 1px solid ${T.border}; color: ${T.text}; padding: 6px 10px; border-radius: 4px; font-family: 'Barlow', sans-serif; font-size: 13px; outline: none; }
+  select, input[type=text], input[type=number], input[type=date], input[type=time] { background: ${T.surface2}; border: 1px solid ${T.border}; color: ${T.text}; padding: 6px 10px; border-radius: 4px; font-family: 'Barlow', sans-serif; font-size: 13px; outline: none; color-scheme: dark; }
   input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   input[type=number] { -moz-appearance: textfield; }
   select:focus, input:focus { border-color: ${T.blue}; }
@@ -2635,14 +2649,19 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         const fromDispT = (d) => imperial ? Math.round((d - 32) * 5/9 * 10)/10 : d;
         const toDispW = (ms) => imperial ? Math.round(ms * 2.237 * 10)/10 : Math.round(ms * 10)/10;
         const fromDispW = (d) => imperial ? Math.round(d / 2.237 * 100)/100 : d;
+        // Card-level provenance shown ONCE here (not repeated per field).
+        // Per-field WeatherFieldMeta now only surfaces user overrides.
+        const cardWxLabel = mode
+          ? weatherSourceLabel({ source: mode === 'forecast' ? 'forecast' : 'normal' }, raceDate)
+          : null;
         return (
         <div className="card">
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
             <div className="card-header" style={{ margin: 0 }}>Race Conditions</div>
             {fetching && <span style={{ fontSize: 11, color: T.blue }}>Fetching weather…</span>}
-            {mode && !fetching && !failed && (
-              <span style={{ fontSize: 11, color: T.textDim }}>
-                {mode === 'forecast' ? 'Forecast' : '10-yr typical'}
+            {cardWxLabel && !fetching && !failed && (
+              <span style={{ fontSize: 11, color: T.textDim, textTransform: "capitalize" }}>
+                {cardWxLabel}
               </span>
             )}
           </div>
@@ -2650,14 +2669,12 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             <div>
               <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
                 Race Date
-                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>auto-fills weather</span>
               </label>
               <input type="date" value={raceDate} onChange={e => setRaceDate(e.target.value)} style={{ width: "100%" }} />
             </div>
             <div>
               <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
                 Start Time
-                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>optional — refines hour</span>
               </label>
               <input type="time" value={raceStartTime} onChange={e => setRaceStartTime(e.target.value)} style={{ width: "100%" }} />
             </div>
@@ -2678,7 +2695,6 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             <div>
               <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
                 Temp ({imperial ? "°F" : "°C"})
-                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>affects air density</span>
               </label>
               {wc.tempC.range && wc.tempC.value !== null ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -2700,29 +2716,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               )}
               <WeatherFieldMeta field={wc.tempC} raceDate={raceDate} onReset={() => resetWeatherField('tempC')} />
             </div>
-            {/* Precip — probability is reference, amount is adjustable */}
-            <div>
-              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-                Precip
-                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>informational</span>
-              </label>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 12, color: T.textMuted, whiteSpace: "nowrap" }}>
-                  {wc.precipPct.value === null ? "—" : `${wc.precipPct.value}% chance`}
-                </span>
-                <input type="number" min={0} step={0.5} placeholder="mm"
-                  value={wc.precipPct.amountMm == null ? "" : wc.precipPct.amountMm}
-                  onChange={e => patchWeatherField('precipPct', { amountMm: e.target.value === "" ? null : Math.max(0, Number(e.target.value)) })}
-                  style={{ width: 70 }} />
-                <span style={{ fontSize: 11, color: T.textDim }}>mm</span>
-              </div>
-              <WeatherFieldMeta field={wc.precipPct} raceDate={raceDate} onReset={() => resetWeatherField('precipPct')} />
-            </div>
             {/* Wind speed */}
             <div>
               <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
                 Wind Speed ({imperial ? "mph" : "m/s"})
-                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>affects drag</span>
               </label>
               {wc.windSpeedMs.range ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -2744,11 +2741,31 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               )}
               <WeatherFieldMeta field={wc.windSpeedMs} raceDate={raceDate} onReset={() => resetWeatherField('windSpeedMs')} />
             </div>
+            {/* Precip — probability is reference, amount is adjustable */}
+            <div>
+              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
+                Precip
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 12, color: T.textMuted, whiteSpace: "nowrap" }}>
+                  {wc.precipPct.value === null ? "—" : `${wc.precipPct.value}% chance`}
+                </span>
+                <input type="number" min={0} step={imperial ? 0.05 : 0.5} placeholder={imperial ? "in" : "mm"}
+                  value={wc.precipPct.amountMm == null ? ""
+                    : (imperial ? Math.round(wc.precipPct.amountMm / 25.4 * 100) / 100 : wc.precipPct.amountMm)}
+                  onChange={e => patchWeatherField('precipPct', {
+                    amountMm: e.target.value === "" ? null
+                      : Math.max(0, imperial ? Number(e.target.value) * 25.4 : Number(e.target.value)),
+                  })}
+                  style={{ width: 70 }} />
+                <span style={{ fontSize: 11, color: T.textDim }}>{imperial ? "in" : "mm"}</span>
+              </div>
+              <WeatherFieldMeta field={wc.precipPct} raceDate={raceDate} onReset={() => resetWeatherField('precipPct')} />
+            </div>
             {/* Wind direction — draggable confidence compass */}
             <div>
               <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
                 Wind From
-                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>drag the needle</span>
               </label>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <DraggableCompass
@@ -2774,7 +2791,6 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             <div style={{ gridColumn: "1 / -1" }}>
               <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
                 Wind Effectiveness
-                <span style={{ color: T.textDim, marginLeft: 6, fontWeight: 400, textTransform: "none" }}>course/judgment input — never auto-filled</span>
               </label>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <input type="range" min={10} max={75} step={5}
@@ -4184,7 +4200,9 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
                 <div>
                   <div style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Precip</div>
                   <div style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 18, color: actualWeather.precipPct.value >= 100 ? T.gold : T.text }}>
-                    {actualWeather.precipPct.amountMm == null ? "—" : `${actualWeather.precipPct.amountMm} mm`}
+                    {actualWeather.precipPct.amountMm == null ? "—"
+                      : (imperial ? `${Math.round(actualWeather.precipPct.amountMm / 25.4 * 100) / 100} in`
+                                  : `${actualWeather.precipPct.amountMm} mm`)}
                   </div>
                   <div style={{ fontSize: 10, color: T.textDim }}>
                     {actualWeather.precipPct.value >= 100 ? "measurable rain" : "dry"}
