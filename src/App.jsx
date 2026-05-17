@@ -2027,7 +2027,8 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
 }
 
 // ─── PLAN TAB ─────────────────────────────────────────────────────────────────
-function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, products, races, setRaces, imperial, bikes, setBikes, activeBikeId, setActiveBikeId }) {
+function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, products, races, setRaces, imperial, bikes, setBikes, activeBikeId, setActiveBikeId,
+  selectedRaceId, setSelectedRaceId, onRequestSelect, onDirtyChange, registerSave }) {
   const [gpxFile, setGpxFile] = useState(null);
   const [surfaceMix, setSurfaceMix] = useState([
     { id: "tarmac",   pct: 30  },
@@ -2077,7 +2078,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   const [intakeEvents, setIntakeEvents] = useState([]);
   const [planName, setPlanName] = useState("Race Plan");
   const [saved, setSaved] = useState(false);
-  const [activeRaceId, setActiveRaceId] = useState(null);
+  // B-36: race id is now app-global. `activeRaceId` aliases the prop so the
+  // many existing read sites keep working unchanged; the only writer is the
+  // create branch in saveOrUpdateRace (→ setSelectedRaceId).
+  const activeRaceId = selectedRaceId ?? null;
   const [snapshotAthlete, setSnapshotAthlete] = useState(null);
   const [snapshotBike, setSnapshotBike] = useState(null);
 
@@ -2312,7 +2316,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         raceRecord.fit = null;
         const newId = await saveRace(raceRecord);
         setRaces(prev => [...prev, { ...raceRecord, id: newId }]);
-        setActiveRaceId(newId);
+        setSelectedRaceId(newId); // B-36: create selects the new race app-wide
       }
       setSaved(true);
     } catch (e) {
@@ -2321,7 +2325,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   };
 
   const loadRace = (race) => {
-    setActiveRaceId(race.id);
+    // B-36: id is app-global now; this only applies the race's state into the tab.
     setSnapshotAthlete(race.athleteSnapshot);
     setSnapshotBike(race.bikeSnapshot ?? null);
     setGpxStats(race.plan.route ?? null);
@@ -2353,7 +2357,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   };
 
   const startNewRace = () => {
-    setActiveRaceId(null);
+    // B-36: id is app-global; this only resets the tab to a blank plan.
     setSnapshotAthlete(null);
     setSnapshotBike(null);
     setPlanName('Race Plan');
@@ -2371,6 +2375,35 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     setRaceDate("");
     setRaceStartTime("");
   };
+
+  // B-36: app-global selection drives the tab's loaded state. Selecting a race
+  // (or New) in the shared header sets selectedRaceId; this applies it here.
+  // The guard (App) runs BEFORE the id changes, so by here the switch is committed.
+  useEffect(() => {
+    if (selectedRaceId == null) { startNewRace(); return; }
+    const race = races.find(r => r.id === selectedRaceId);
+    if (race) loadRace(race);
+  }, [selectedRaceId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // B-36: real dirty tracking (the old `saved` flag was too coarse — false even
+  // right after a clean load). Signature mirrors exactly what saveOrUpdateRace
+  // persists; baseline captured on load/new/save. Compared → onDirtyChange.
+  const planSig = JSON.stringify({
+    name: planName, gpxFileName: gpxFile, raceDate, raceStartTime,
+    conditions: weatherContext, surfaceMix, climbCategories, pacingMode,
+    targetIF, maxPower, goalTimeMin, segments,
+    nutritionPlan: { preRaceFueling, intakeEvents },
+    hasPlan: !!pacingPlan,
+  });
+  const baselineSigRef = useRef(planSig);
+  useEffect(() => { baselineSigRef.current = planSig; }, [selectedRaceId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (saved) baselineSigRef.current = planSig; }, [saved]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    onDirtyChange?.(planSig !== baselineSigRef.current);
+  }, [planSig]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // B-36: expose save so the App-level switch guard's "Save" can persist first.
+  useEffect(() => { registerSave?.(saveOrUpdateRace); }); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateAthleteProfile = async () => {
     // B-6: complete athleteSnapshot via shared buildAthleteSnapshot helper.
@@ -2451,33 +2484,12 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
 
   return (
     <div>
-      {/* ── RACE selector card ───────────────────────────────────────── */}
+      {/* ── Race snapshot card (B-36: selector moved to the shared header;
+             this retains only the athlete/bike snapshot reconciliation UI,
+             rendered only when a saved race is loaded). ─────────────────── */}
+      {snapshotAthlete && (
       <div className="card">
         <div className="card-header">Race</div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: (snapshotAthlete) ? 12 : 0 }}>
-          <select
-            value={activeRaceId ?? ""}
-            onChange={e => {
-              const id = Number(e.target.value);
-              const race = races.find(r => r.id === id);
-              if (race) loadRace(race);
-            }}
-            style={{ flex: 1, fontSize: 12 }}
-          >
-            <option value="">— New Race —</option>
-            {races.map(r => (
-              <option key={r.id} value={r.id}>
-                {r.name}{r.status === 'analyzed' ? ' ✓' : ''}
-              </option>
-            ))}
-          </select>
-          {activeRaceId && (
-            <button className="btn-secondary" style={{ fontSize: 11, whiteSpace: "nowrap" }} onClick={startNewRace}>
-              + New
-            </button>
-          )}
-        </div>
-        {snapshotAthlete && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {/* Athlete snapshot row */}
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2506,8 +2518,8 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               </button>
             </div>
           </div>
-        )}
       </div>
+      )}
 
       {/* Step 1 — Route */}
       <div className="card">
@@ -3425,7 +3437,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               }}>
                 {r.status === 'analyzed' ? 'Analyzed' : 'Planned'}
               </span>
-              <button className="btn-secondary" style={{ fontSize: 10, padding: "3px 8px", flexShrink: 0 }} onClick={() => loadRace(r)}>
+              <button className="btn-secondary" style={{ fontSize: 10, padding: "3px 8px", flexShrink: 0 }} onClick={() => onRequestSelect(r.id)}>
                 Load
               </button>
               <button
@@ -3434,7 +3446,9 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                   try {
                     await deleteRace(r.id);
                     setRaces(prev => prev.filter(x => x.id !== r.id));
-                    if (activeRaceId === r.id) startNewRace();
+                    // Race is gone — reset selection directly (no save-guard;
+                    // there is nothing to save back into a deleted race).
+                    if (activeRaceId === r.id) setSelectedRaceId(null);
                   } catch (e) { alert('Delete failed: ' + e.message); }
                 }}
                 style={{ background: "none", border: "none", color: T.textDim, fontSize: 18, cursor: "pointer", padding: "0 2px", lineHeight: 1, flexShrink: 0 }}
@@ -3448,8 +3462,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
 }
 
 // ─── ANALYZE TAB ──────────────────────────────────────────────────────────────
-function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
-  const [selectedRaceId, setSelectedRaceId] = useState("");
+function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRaceId, onDirtyChange, onActualWeather }) {
+  // B-36: race selection is app-wide (shared header). AnalyzeTab consumes
+  // selectedRaceId as a prop (Number id, or null = standalone). No local
+  // selector / state here anymore.
   const [fitFile, setFitFile] = useState(null);
   const [fitData, setFitData] = useState(null);
   const [fitSaved, setFitSaved] = useState(false);
@@ -3529,6 +3545,34 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       setNoPowerToastDismissed(false);
     }
   }, [selectedRaceId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // B-36: report unsaved ANALYZE-side changes up so the shared header can
+  // guard race switches. Signature = realized fuel log + loaded-but-unsaved
+  // FIT + pre-race-fueling choice (the only in-memory ANALYZE state a race
+  // switch would discard). Baseline re-captured on switch (after the loader's
+  // state flushes — hence the setTimeout(0)) and on successful saves.
+  const analyzeSig = JSON.stringify({
+    actualIntake,
+    fit: fitData ? (fitFile ?? '') : null,
+    analyzePreRaceFueling,
+  });
+  const analyzeSigRef = useRef(analyzeSig);
+  analyzeSigRef.current = analyzeSig;
+  const analyzeBaseRef = useRef(analyzeSig);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      analyzeBaseRef.current = analyzeSigRef.current;
+      onDirtyChange?.(false);
+    }, 0);
+    return () => clearTimeout(t);
+  }, [selectedRaceId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (fitSaved) analyzeBaseRef.current = analyzeSigRef.current; }, [fitSaved]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (actualIntakeSavedFlash) analyzeBaseRef.current = analyzeSigRef.current; }, [actualIntakeSavedFlash]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { onDirtyChange?.(analyzeSig !== analyzeBaseRef.current); }, [analyzeSig]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // B-36: publish realized (FIT-day) weather up so the shared header can show
+  // "Actual" conditions while the ANALYZE tab is active.
+  useEffect(() => { onActualWeather?.(actualWeather); }, [actualWeather]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Shim: map new race schema onto the old selectedPlan shape so all downstream
   // references (selectedPlan.pacingPlan, selectedPlan.route, etc.) work unchanged.
@@ -4010,17 +4054,6 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial }) {
       {/* Load section */}
       <div className="card">
         <div className="card-header">Load Data</div>
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Race</label>
-          <select value={selectedRaceId} onChange={e => setSelectedRaceId(e.target.value)} style={{ width: "100%" }}>
-            <option value="">— Standalone (no race selected) —</option>
-            {races.map(r => (
-              <option key={r.id} value={r.id}>
-                {r.name}{r.status === 'analyzed' ? ' ✓' : ''}
-              </option>
-            ))}
-          </select>
-        </div>
         <DropZone accept=".fit" label="Drop .fit file or click to upload" onFile={handleFIT} loaded={fitFile} />
         {fitError && <div className="alert alert-danger" style={{ marginTop: 8 }}>{fitError}</div>}
         {/* No-power dismissible toast — appears immediately on parse, before metadata. */}
@@ -6050,6 +6083,93 @@ function LibraryTab({ products, setProducts }) {
   );
 }
 
+// ─── B-36: PERSISTENT RACE HEADER ─────────────────────────────────────────────
+// One shared header in a fixed slot below the tab bar, identical on Model and
+// Analyze. Owns the single app-wide race selector. Identity always; conditions
+// contextual (planned on Model, actual on Analyze); absent data is omitted, no
+// empty placeholders. Empty state = just the selector.
+function RaceHeader({ races, selectedRaceId, onRequestSelect, tab, athletes, bikes, imperial, actualWx }) {
+  const race = selectedRaceId != null ? races.find(r => r.id === selectedRaceId) : null;
+
+  const selector = (
+    <select
+      value={race ? String(race.id) : ""}
+      onChange={e => onRequestSelect(e.target.value === "" ? null : Number(e.target.value))}
+      style={{ fontSize: 12, minWidth: 200, maxWidth: 320 }}
+    >
+      <option value="">+ New race</option>
+      {races.map(r => (
+        <option key={r.id} value={String(r.id)}>
+          {r.name}{r.status === 'analyzed' ? ' ✓' : ''}
+        </option>
+      ))}
+    </select>
+  );
+
+  // Empty state — nothing to identify, just the control.
+  if (!race) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 12, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 6, padding: "10px 14px", marginBottom: 16 }}>
+        {selector}
+        <span style={{ fontSize: 11, color: T.textDim }}>Select or create a race</span>
+      </div>
+    );
+  }
+
+  const athleteName = race.athleteSnapshot?.name
+    ?? athletes.find(a => a.id === race.athleteId)?.name ?? null;
+  const bikeName = race.bikeSnapshot?.name
+    ?? bikes.find(b => b.id === race.bikeId)?.name ?? null;
+  const dateStr = race.plan?.raceDate
+    ? race.plan.raceDate + (race.plan.raceStartTime ? ` ${race.plan.raceStartTime}` : '')
+    : null;
+
+  const idChip = (txt) => txt == null ? null : (
+    <span style={{ fontSize: 12, color: T.textMuted }}>{txt}</span>
+  );
+  const dot = <span style={{ color: T.textDim }}>·</span>;
+  const idParts = [
+    <span key="n" style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: "Barlow Condensed", letterSpacing: "0.04em" }}>{race.name}</span>,
+    dateStr   && idChip(dateStr),
+    athleteName && idChip(athleteName),
+    bikeName  && idChip(bikeName),
+  ].filter(Boolean);
+
+  // Contextual conditions. Model → planned (race.plan.conditions via weatherFlat).
+  // Analyze → actual (the FIT-derived realized weather AnalyzeTab reports up).
+  // Either is omitted entirely when its source has nothing.
+  let condLabel = null, condText = null;
+  if (tab === "MODEL" && race.plan?.conditions) {
+    const w = weatherFlat(migrateWeather(race.plan.conditions));
+    const bits = [];
+    if (w.tempC != null) bits.push(imperial ? `${Math.round(w.tempC * 9/5 + 32)}°F` : `${w.tempC}°C`);
+    if (w.windSpeedMs > 0) bits.push(`${imperial ? Math.round(w.windSpeedMs * 2.237 * 10)/10 : w.windSpeedMs}${imperial ? 'mph' : 'm/s'} from ${degToCompass(w.windDirDeg)}`);
+    if (w.precipPct != null) bits.push(`${w.precipPct}% precip`);
+    if (bits.length) { condLabel = "Planned"; condText = bits.join(' · '); }
+  } else if (tab === "ANALYZE" && actualWx) {
+    const bits = [];
+    if (actualWx.tempC?.value != null) bits.push(imperial ? `${Math.round(actualWx.tempC.value * 9/5 + 32)}°F` : `${actualWx.tempC.value}°C`);
+    if (actualWx.windSpeedMs?.value != null) bits.push(`${imperial ? Math.round(actualWx.windSpeedMs.value * 2.237 * 10)/10 : actualWx.windSpeedMs.value}${imperial ? 'mph' : 'm/s'} from ${degToCompass(actualWx.windDirDeg?.value ?? 0)}`);
+    if (actualWx.precipPct?.amountMm != null) bits.push(`${imperial ? Math.round(actualWx.precipPct.amountMm / 25.4 * 100)/100 + ' in' : actualWx.precipPct.amountMm + ' mm'} precip`);
+    if (bits.length) { condLabel = "Actual"; condText = bits.join(' · '); }
+  }
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 6, padding: "10px 14px", marginBottom: 16, flexWrap: "wrap" }}>
+      {selector}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {idParts.map((p, i) => <span key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>{i > 0 && dot}{p}</span>)}
+      </div>
+      {condText && (
+        <div style={{ marginLeft: "auto", fontSize: 11, color: T.textDim, whiteSpace: "nowrap" }}>
+          <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", marginRight: 6 }}>{condLabel}</span>
+          {condText}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 function lsGet(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
@@ -6065,6 +6185,35 @@ export default function App() {
   const [activeBikeId, setActiveBikeId] = useState(() => lsGet('fm_activeBikeId', 1));
   const [products, setProducts] = useState(() => lsGet('fm_products', DEFAULT_PRODUCTS));
   const [races, setRaces] = useState([]);
+
+  // B-36: ONE app-wide selected race (was two disagreeing per-tab selectors).
+  // null = no race / new. Tab switches never touch this; only race switches do.
+  const [selectedRaceId, setSelectedRaceId] = useState(null);
+  // Dirty state reported up by each tab; aggregated for the switch guard.
+  const [planDirty, setPlanDirty] = useState(false);
+  const [analyzeDirty, setAnalyzeDirty] = useState(false);
+  const isDirty = planDirty || analyzeDirty;
+  // AnalyzeTab publishes its FIT-derived realized weather here so the shared
+  // header can show "Actual" conditions on the Analyze tab.
+  const [actualWxSummary, setActualWxSummary] = useState(null);
+  // PlanTab registers its save fn so the guard's "Save" can persist before switching.
+  const planSaveRef = useRef(null);
+  // Pending guarded race switch: holds the target id (or null) awaiting a decision.
+  const [pendingSwitch, setPendingSwitch] = useState(undefined); // undefined = no prompt
+
+  // Guarded race switch. Tab switches are NOT routed here (always free).
+  const requestSelectRace = useCallback((targetId) => {
+    if (targetId === selectedRaceId) return;
+    if (isDirty) { setPendingSwitch(targetId); return; } // open Save/Discard/Cancel
+    setSelectedRaceId(targetId);
+  }, [selectedRaceId, isDirty]);
+
+  const guardSave = async () => {
+    try { await planSaveRef.current?.(); } catch { /* save fn surfaces its own error */ }
+    const t = pendingSwitch; setPendingSwitch(undefined); setSelectedRaceId(t ?? null);
+  };
+  const guardDiscard = () => { const t = pendingSwitch; setPendingSwitch(undefined); setSelectedRaceId(t ?? null); };
+  const guardCancel  = () => setPendingSwitch(undefined);
 
   const athlete = athletes.find(a => a.id === activeAthleteId) || athletes[0];
 
@@ -6118,11 +6267,34 @@ export default function App() {
         {/* Content — all tabs stay mounted; inactive ones are hidden via CSS so
             in-session state (GPX, FIT, plan calculations) survives tab switches. */}
         <div style={{ maxWidth: 800, margin: "0 auto", padding: "20px 16px" }}>
+          {/* B-36: persistent race header — same slot below the tab bar, both
+              Model and Analyze. Only shown for the race-scoped tabs. */}
+          {(tab === "MODEL" || tab === "ANALYZE") && (
+            <RaceHeader races={races} selectedRaceId={selectedRaceId} onRequestSelect={requestSelectRace}
+              tab={tab} athletes={athletes} bikes={bikes} imperial={imperial} actualWx={actualWxSummary} />
+          )}
+          {pendingSwitch !== undefined && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+              <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: 24, width: 380 }}>
+                <div className="card-header" style={{ marginBottom: 12 }}>Unsaved changes</div>
+                <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 20, lineHeight: 1.5 }}>
+                  The current race has unsaved changes. Save before switching?
+                </div>
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                  <button className="btn-secondary" onClick={guardCancel}>Cancel</button>
+                  <button className="btn-secondary" onClick={guardDiscard}>Discard</button>
+                  <button className="btn-primary" onClick={guardSave}>Save</button>
+                </div>
+              </div>
+            </div>
+          )}
           <div style={{ display: tab === "MODEL"    ? undefined : "none" }}>
-            <PlanTab athlete={athlete} athletes={athletes} setActiveAthleteId={setActiveAthleteId} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />
+            <PlanTab athlete={athlete} athletes={athletes} setActiveAthleteId={setActiveAthleteId} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId}
+              selectedRaceId={selectedRaceId} setSelectedRaceId={setSelectedRaceId} onRequestSelect={requestSelectRace} onDirtyChange={setPlanDirty} registerSave={fn => { planSaveRef.current = fn; }} />
           </div>
           <div style={{ display: tab === "ANALYZE"  ? undefined : "none" }}>
-            <AnalyzeTab athlete={athlete} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />
+            <AnalyzeTab athlete={athlete} products={products} races={races} setRaces={setRaces} imperial={imperial} bikes={bikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId}
+              selectedRaceId={selectedRaceId} onDirtyChange={setAnalyzeDirty} onActualWeather={setActualWxSummary} />
           </div>
           <div style={{ display: tab === "PERFORM"  ? undefined : "none" }}>
             <div style={{ padding: "40px 20px", textAlign: "center" }}>
