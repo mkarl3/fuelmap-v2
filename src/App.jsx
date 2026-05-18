@@ -2039,6 +2039,96 @@ function AthleteModal({ athlete, onSave, onClose, imperial }) {
     </div>
   );
 }
+// ─── B-37: MODEL STEPPED WORKFLOW ─────────────────────────────────────────────
+// Build mode = guided input (details → conditions → pacing). GENERATE produces
+// the power plan and (first time) creates the race. Review mode = result-
+// focused (power → nutrition → full), inputs editable alongside output. The
+// rail spans the whole workflow; it is a guide, not a locked wizard — any
+// reachable step is directly clickable.
+const MODEL_STEPS = [
+  { id: 'details',    label: 'Race Details',    phase: 'build'  },
+  { id: 'conditions', label: 'Conditions',      phase: 'build'  },
+  { id: 'pacing',     label: 'Pacing Strategy', phase: 'build'  },
+  { id: 'power',      label: 'Power Plan',      phase: 'review' },
+  { id: 'nutrition',  label: 'Nutrition Plan',  phase: 'review' },
+  { id: 'full',       label: 'Summary',         phase: 'review' },
+];
+const MODEL_BUILD_STEPS  = MODEL_STEPS.filter(s => s.phase === 'build');
+const MODEL_REVIEW_STEPS = MODEL_STEPS.filter(s => s.phase === 'review');
+
+// Breadcrumb-style step rail. Reachable steps clickable; the current step is
+// highlighted; review steps are gated until a power plan exists. GENERATE sits
+// between the build and review halves as the pivot marker.
+function StepRail({ current, hasPlan, onJump }) {
+  const curIdx = MODEL_STEPS.findIndex(s => s.id === current);
+  const pill = (s) => {
+    const idx = MODEL_STEPS.findIndex(x => x.id === s.id);
+    const isCurrent = s.id === current;
+    const reachable = s.phase === 'build' ? true : hasPlan;
+    const done = reachable && !isCurrent && idx < curIdx;
+    return (
+      <button
+        key={s.id}
+        onClick={() => reachable && !isCurrent && onJump(s.id)}
+        disabled={!reachable || isCurrent}
+        title={!reachable ? 'Generate a power plan to unlock review' : ''}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 5, padding: '5px 8px',
+          flexShrink: 0,
+          borderRadius: 4, border: `1px solid ${isCurrent ? T.blue : reachable ? T.border : 'transparent'}`,
+          background: isCurrent ? `${T.blue}1A` : 'transparent',
+          color: isCurrent ? T.text : reachable ? T.textMuted : T.textDim,
+          fontFamily: 'Barlow Condensed', fontWeight: 700, fontSize: 11,
+          letterSpacing: '0.03em', textTransform: 'uppercase', whiteSpace: 'nowrap',
+          cursor: reachable && !isCurrent ? 'pointer' : 'default',
+          opacity: reachable ? 1 : 0.45,
+        }}>
+        <span style={{
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 16, height: 16, borderRadius: '50%', fontSize: 9, flexShrink: 0,
+          background: isCurrent ? T.blue : done ? `${T.green}30` : T.surface2,
+          color: isCurrent ? '#fff' : done ? T.green : T.textDim,
+        }}>{done ? '✓' : MODEL_STEPS.findIndex(x => x.id === s.id) + 1}</span>
+        {s.label}
+      </button>
+    );
+  };
+  const sep = (key, label) => (
+    <span key={key} style={{ display: 'flex', alignItems: 'center', gap: 5, color: T.textDim, padding: '0 1px', flexShrink: 0 }}>
+      <span style={{ width: 12, borderTop: `1px solid ${T.border}` }} />
+      {label && <span style={{ fontFamily: 'Barlow Condensed', fontWeight: 700, fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: hasPlan ? T.green : T.textDim }}>{label}</span>}
+      <span style={{ width: 12, borderTop: `1px solid ${T.border}` }} />
+    </span>
+  );
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'nowrap',
+      overflowX: 'auto', padding: '8px 10px', marginBottom: 16, background: T.surface,
+      border: `1px solid ${T.border}`, borderRadius: 6,
+    }}>
+      {MODEL_BUILD_STEPS.map(pill)}
+      {sep('genmark', hasPlan ? 'Generated' : 'Generate')}
+      {MODEL_REVIEW_STEPS.map(pill)}
+    </div>
+  );
+}
+
+// Build-mode forward/back nav. Forward is gated (e.g. GPX required); back is
+// always free. The breadcrumb StepRail handles arbitrary jumps; this is the
+// guided linear path.
+function StepNav({ onBack, onNext, nextLabel = 'Next →', backLabel = '← Back', nextDisabled = false, nextHint = '' }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 20px' }}>
+      {onBack ? <button className="btn-secondary" onClick={onBack}>{backLabel}</button> : <span />}
+      <div style={{ flex: 1 }} />
+      {nextDisabled && nextHint && <span style={{ fontSize: 11, color: T.textDim }}>{nextHint}</span>}
+      {onNext && (
+        <button className="btn-primary" onClick={onNext} disabled={nextDisabled}
+          style={nextDisabled ? { opacity: 0.5, cursor: 'default' } : undefined}>{nextLabel}</button>
+      )}
+    </div>
+  );
+}
 
 // ─── PLAN TAB ─────────────────────────────────────────────────────────────────
 function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, products, races, setRaces, imperial, bikes, setBikes, activeBikeId, setActiveBikeId,
@@ -2092,6 +2182,16 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   const [intakeEvents, setIntakeEvents] = useState([]);
   const [planName, setPlanName] = useState("Race Plan");
   const [saved, setSaved] = useState(false);
+  // B-37: stepped-workflow position. 'details'|'conditions'|'pacing' = build
+  // mode (guided input); 'power'|'nutrition'|'full' = review mode (result-
+  // focused, inputs editable alongside output). loadRace/startNewRace set the
+  // entry step (saved race with a plan → review; new/planless → build).
+  const [step, setStep] = useState('details');
+  const stepMeta = MODEL_STEPS.find(s => s.id === step) ?? MODEL_STEPS[0];
+  const mode = stepMeta.phase; // 'build' | 'review'
+  // Re-orient to the top of the page on every step change (breadcrumb jump or
+  // linear nav) so a new section always starts from its header.
+  useEffect(() => { window.scrollTo({ top: 0 }); }, [step]);
   // B-36: race id is now app-global. `activeRaceId` aliases the prop so the
   // many existing read sites keep working unchanged; the only writer is the
   // create branch in saveOrUpdateRace (→ setSelectedRaceId).
@@ -2211,7 +2311,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                 `Either lower your NP IF target or raise your climb caps.`
               : `Plan generation failed: ${flatIF.reason}`
           );
-          return;
+          return null;
         }
         strat = { mode: "constant_if", targetIF: flatIF };
       } else if (pacingMode === "segments") {
@@ -2246,14 +2346,29 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             ? ' Athlete FTP is required for climb-cap defaults — please set FTP in the athlete profile.'
             : ''
         }`);
-        return;
+        return null;
       }
       const viData = computeVI(effectiveStats, surfaceMix, result.estimatedDurationMin);
-      setPacingPlan({ ...result, ...viData, resolvedNpIF: result.ifActual });
+      const plan = { ...result, ...viData, resolvedNpIF: result.ifActual };
+      setPacingPlan(plan);
       setSaved(false);
+      return plan; // B-37: handleGenerate persists this on first Generate
     } catch(e) {
       alert("Plan computation error: " + e.message + "\n" + e.stack?.split('\n').slice(0,3).join('\n'));
+      return null;
     }
+  };
+
+  // B-37: GENERATE = compute the plan, advance to review mode, and (first time
+  // only) create+persist the race — consistent with the existing save model
+  // ("a race is created at Generate"). Subsequent edits are in-memory until an
+  // explicit Update (no autosave). Passing the freshly-built plan to
+  // saveOrUpdateRace avoids the setPacingPlan-not-yet-committed race.
+  const handleGenerate = () => {
+    const plan = computePlan();
+    if (!plan) return; // failure already surfaced via alert
+    setStep('power');
+    if (!activeRaceId) saveOrUpdateRace(plan); // create on first Generate
   };
 
   const overlayData = pacingPlan
@@ -2271,6 +2386,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   // Sensitivity analysis state — sliders adjust inputs, show Δ duration live
   const [sensOpen, setSensOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // B-37: lifted out of the climb-strategy render IIFE. That IIFE is now
+  // inside a step-gated fragment; a useState there would be a conditional
+  // hook (React hooks-order violation when navigating steps).
+  const [climbDetailOpen, setClimbDetailOpen] = useState(false);
   const [sensPower,  setSensPower]  = useState(0);  // % adjustment to IF
   const [sensWeight, setSensWeight] = useState(0);  // lbs/kg delta
   const [sensCdA,    setSensCdA]    = useState(0);  // % adjustment to CdA
@@ -2290,7 +2409,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
   const sensDeltaMin = sensAdjDuration - sensBaseDuration;
   const sensAnyActive = sensPower !== 0 || sensWeight !== 0 || sensCdA !== 0 || sensCrr !== 0;
 
-  const saveOrUpdateRace = async () => {
+  // B-37: planOverride lets handleGenerate persist the freshly-built plan on
+  // first Generate without waiting for the setPacingPlan state commit. Guard
+  // save (registerSave) calls with no arg → falls back to pacingPlan state.
+  const saveOrUpdateRace = async (planOverride) => {
     const raceRecord = {
       name: planName,
       updatedAt: new Date().toISOString(),
@@ -2307,7 +2429,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       plan: {
         route: gpxStats,
         gpxFileName: gpxFile,
-        pacingPlan,
+        pacingPlan: planOverride ?? pacingPlan,
         nutritionPlan: { preRaceFueling, intakeEvents: [...intakeEvents] },
         conditions: { ...weatherContext },
         raceDate,            // B-35: '' when unset; structured weather persists as-is
@@ -2366,8 +2488,15 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     setPreRaceFueling(race.plan.nutritionPlan?.preRaceFueling ?? PRE_RACE_FUELING_DEFAULT_ID);
     setIntakeEvents(race.plan.nutritionPlan?.intakeEvents ?? []);
     setPlanName(race.name);
-    setPacingPlan(null);
+    // B-37: restore the PERSISTED power plan (not a recompute) so a saved race
+    // opens in review mode. Pre-B-37 this was setPacingPlan(null), which forced
+    // a re-Generate on every load and made "return to a saved race" impossible.
+    const savedPlan = race.plan?.pacingPlan ?? null;
+    setPacingPlan(savedPlan);
     setSaved(false);
+    // Entry step: a race with a computed plan opens at Power Review; a
+    // planless race opens in build mode at Step 1 (Race Details).
+    setStep(savedPlan ? 'power' : 'details');
   };
 
   const startNewRace = () => {
@@ -2376,6 +2505,18 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     setSnapshotBike(null);
     setPlanName('Race Plan');
     setSaved(false);
+    // B-37: a new race is a clean slate at Step 1 of build mode. Pre-B-37 the
+    // bottom saved-races list was the only "new" path and it left stale route/
+    // plan/intake from the prior race in memory; in the guided flow that would
+    // surface another race's data in Race Details. Clear it. (weatherContext is
+    // deliberately preserved per B-35 — re-fetches off the new date anyway.)
+    setStep('details');
+    setGpxStats(null);
+    setGpxFile(null);
+    setPacingPlan(null);
+    setIntakeEvents([]);
+    setSegments([]);
+    setNumSegments(3);
     // Reset climb caps to FTP-based defaults so the new race doesn't inherit
     // the previous race's edits (Group C — fresh races start fresh).
     setClimbCategories(buildDefaultClimbCaps(currentAthlete?.ftp) ?? {
@@ -2498,14 +2639,15 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
 
   return (
     <div>
-      {/* ── Race snapshot card (B-36: selector moved to the shared header;
-             this retains only the athlete/bike snapshot reconciliation UI,
-             rendered only when a saved race is loaded). ─────────────────── */}
-      {snapshotAthlete && (
+      <StepRail current={step} hasPlan={!!pacingPlan} onJump={setStep} />
+
+      {/* ═══════════════ STEP 1 — RACE DETAILS (build) ═══════════════ */}
+      {step === 'details' && (<>
       <div className="card">
-        <div className="card-header">Race</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {/* Athlete snapshot row */}
+        <div className="card-header">01 — Race Details</div>
+        {/* B-36 snapshot reconciliation — only when a saved race is loaded */}
+        {snapshotAthlete && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14, paddingBottom: 14, borderBottom: `1px solid ${T.border}` }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", width: 44, flexShrink: 0 }}>Athlete</span>
               <span style={{ fontSize: 12, flex: 1, color: T.text }}>
@@ -2518,7 +2660,6 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                 Update Athlete Profile
               </button>
             </div>
-            {/* Bike snapshot row */}
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 10, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", width: 44, flexShrink: 0 }}>Bike</span>
               <span style={{ fontSize: 12, flex: 1, color: T.text }}>
@@ -2532,12 +2673,23 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               </button>
             </div>
           </div>
-      </div>
-      )}
-
-      {/* Step 1 — Route */}
-      <div className="card">
-        <div className="card-header">01 — Route</div>
+        )}
+        {/* Race name */}
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Race Name</label>
+          <input type="text" value={planName} onChange={e => setPlanName(e.target.value)} placeholder="Race name" style={{ width: "100%" }} />
+        </div>
+        {/* Race date + start time — drives Step 2 weather auto-fill (B-35) */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Race Date</label>
+            <input type="date" value={raceDate} onChange={e => setRaceDate(e.target.value)} style={{ width: "100%" }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Start Time</label>
+            <input type="time" value={raceStartTime} onChange={e => setRaceStartTime(e.target.value)} style={{ width: "100%" }} />
+          </div>
+        </div>
         <DropZone accept=".gpx" label="Drop GPX file or click to upload" onFile={handleGPX} loaded={gpxFile} />
         {/* Athlete + Bike selectors */}
         <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
@@ -2556,7 +2708,59 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             })}
           </select>
         </div>
-        <div style={{ marginTop: 14 }}>
+        {/* B-37: manual distance/gain entry removed — GPX is required (a plan
+            needs the route's grade & bearing data; spec-mandated deletion). */}
+        {gpxStats && (
+          <>
+            <div className="stat-row" style={{ marginTop: 12 }}>
+              <div className="stat-box">
+                <div className="stat-label">Distance</div>
+                <div className="stat-value">{imperial ? Math.round(gpxStats.totalDistKm * 0.621) : gpxStats.totalDistKm}<span className="stat-unit">{imperial ? "mi" : "km"}</span></div>
+              </div>
+              <div className="stat-box">
+                <div className="stat-label">Gain</div>
+                <div className="stat-value">{imperial ? Math.round(gpxStats.elevGainM * 3.281) : gpxStats.elevGainM}<span className="stat-unit">{imperial ? "ft" : "m"}</span></div>
+              </div>
+              <div className="stat-box">
+                <div className="stat-label">Loss</div>
+                <div className="stat-value">{imperial ? Math.round(gpxStats.elevLossM * 3.281) : gpxStats.elevLossM}<span className="stat-unit">{imperial ? "ft" : "m"}</span></div>
+              </div>
+            </div>
+            {gpxStats?.elevProfile?.length > 0 && (() => {
+              const distUnit = imperial ? "mi" : "km";
+              const eleUnit  = imperial ? "ft" : "m";
+              const roundTo  = imperial ? 50 : 10;
+              const profileData = gpxStats.elevProfile.map(pt => ({
+                dist: imperial ? Math.round(pt.dist * 0.621 * 10) / 10 : pt.dist,
+                ele:  imperial ? Math.round(pt.ele * 3.281) : Math.round(pt.ele),
+              }));
+              const eleVals = profileData.map(p => p.ele);
+              const eleMin  = Math.floor(Math.min(...eleVals) / roundTo) * roundTo;
+              const eleMax  = Math.ceil( Math.max(...eleVals) / roundTo) * roundTo;
+              return (
+                <div style={{ height: 100, marginTop: 4 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={profileData} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+                      <XAxis dataKey="dist" tick={{ fill: T.textDim, fontSize: 10 }} tickFormatter={v => `${Math.round(v)}${distUnit}`} tickCount={6} />
+                      <YAxis domain={[eleMin, eleMax]} tick={{ fill: T.textDim, fontSize: 10 }} width={36} tickFormatter={v => `${v}${eleUnit}`} />
+                      <Area type="monotone" dataKey="ele" stroke="rgba(120,120,120,0.6)" fill="rgba(80,80,80,0.3)" dot={false} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              );
+            })()}
+          </>
+        )}
+      </div>
+      <StepNav onNext={() => setStep('conditions')} nextLabel="Conditions →"
+        nextDisabled={!gpxStats} nextHint="Load a GPX route to continue" />
+      </>)}
+
+      {/* ═══════════════ STEP 2 — CONDITIONS (build) ═══════════════ */}
+      {step === 'conditions' && (<>
+      <div className="card">
+        <div className="card-header">02 — Surface</div>
+        <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
             <label style={{ fontSize: 11, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase" }}>Surface Mix</label>
             {(() => {
@@ -2606,59 +2810,6 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             }}>+ Add Surface</button>
           )}
         </div>
-        {!gpxFile && (
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Distance ({imperial ? "mi" : "km"})</label>
-              <input type="number" value={manualDist} onChange={e => setManualDist(Number(e.target.value))} style={{ width: "100%" }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Elevation Gain ({imperial ? "ft" : "m"})</label>
-              <input type="number" value={manualGain} onChange={e => setManualGain(Number(e.target.value))} style={{ width: "100%" }} />
-            </div>
-          </div>
-        )}
-        {effectiveStats && (
-          <>
-            <div className="stat-row" style={{ marginTop: 12 }}>
-              <div className="stat-box">
-                <div className="stat-label">Distance</div>
-                <div className="stat-value">{imperial ? Math.round(effectiveStats.totalDistKm * 0.621) : effectiveStats.totalDistKm}<span className="stat-unit">{imperial ? "mi" : "km"}</span></div>
-              </div>
-              <div className="stat-box">
-                <div className="stat-label">Gain</div>
-                <div className="stat-value">{imperial ? Math.round(effectiveStats.elevGainM * 3.281) : effectiveStats.elevGainM}<span className="stat-unit">{imperial ? "ft" : "m"}</span></div>
-              </div>
-              <div className="stat-box">
-                <div className="stat-label">Loss</div>
-                <div className="stat-value">{imperial ? Math.round(effectiveStats.elevLossM * 3.281) : effectiveStats.elevLossM}<span className="stat-unit">{imperial ? "ft" : "m"}</span></div>
-              </div>
-            </div>
-            {gpxStats?.elevProfile?.length > 0 && (() => {
-              const distUnit = imperial ? "mi" : "km";
-              const eleUnit  = imperial ? "ft" : "m";
-              const roundTo  = imperial ? 50 : 10;
-              const profileData = gpxStats.elevProfile.map(pt => ({
-                dist: imperial ? Math.round(pt.dist * 0.621 * 10) / 10 : pt.dist,
-                ele:  imperial ? Math.round(pt.ele * 3.281) : Math.round(pt.ele),
-              }));
-              const eleVals = profileData.map(p => p.ele);
-              const eleMin  = Math.floor(Math.min(...eleVals) / roundTo) * roundTo;
-              const eleMax  = Math.ceil( Math.max(...eleVals) / roundTo) * roundTo;
-              return (
-                <div style={{ height: 100, marginTop: 4 }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={profileData} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-                      <XAxis dataKey="dist" tick={{ fill: T.textDim, fontSize: 10 }} tickFormatter={v => `${Math.round(v)}${distUnit}`} tickCount={6} />
-                      <YAxis domain={[eleMin, eleMax]} tick={{ fill: T.textDim, fontSize: 10 }} width={36} tickFormatter={v => `${v}${eleUnit}`} />
-                      <Area type="monotone" dataKey="ele" stroke="rgba(120,120,120,0.6)" fill="rgba(80,80,80,0.3)" dot={false} />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              );
-            })()}
-          </>
-        )}
       </div>
 
       {/* Race Conditions — B-35 Slice C: weather auto-fills from race date +
@@ -2691,20 +2842,21 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               </span>
             )}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
-            <div>
-              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-                Race Date
-              </label>
-              <input type="date" value={raceDate} onChange={e => setRaceDate(e.target.value)} style={{ width: "100%" }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>
-                Start Time
-              </label>
-              <input type="time" value={raceStartTime} onChange={e => setRaceStartTime(e.target.value)} style={{ width: "100%" }} />
-            </div>
+          {/* B-37: race date/time moved upstream to Step 1 (Race Details);
+              weather auto-fills off that date. Show it read-only here for
+              context, with a jump-back affordance. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, fontSize: 12, color: T.textMuted }}>
+            <span style={{ fontSize: 10, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.textDim }}>Race Date</span>
+            <span style={{ color: raceDate ? T.text : T.textDim }}>
+              {raceDate ? raceDate + (raceStartTime ? ` · ${raceStartTime}` : '') : 'not set'}
+            </span>
+            <button className="btn-secondary" style={{ fontSize: 10, padding: "2px 8px" }} onClick={() => setStep('details')}>Edit in Race Details</button>
           </div>
+          {!raceDate && (
+            <div className="alert alert-info" style={{ marginBottom: 12 }}>
+              Set a race date in Step 1 (Race Details) to auto-fill weather. Manual entry works without it.
+            </div>
+          )}
           {raceDate && !routeLatLon && (
             <div className="alert alert-info" style={{ marginBottom: 12 }}>
               Load a GPX route to auto-fill weather for the race location. Manual entry works without it.
@@ -2839,47 +2991,15 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         </div>
         );
       })()}
-      {/* Legacy weather summary card — only shown when something is set. */}
-      {(wxFlat.tempC !== null || wxFlat.precipPct !== null || wxFlat.windSpeedMs > 0) && (
-      <div className="card">
-        <div className="card-header">Conditions Summary</div>
-        {(
-          <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {wxFlat.tempC !== null && (
-              <span style={{ fontSize: 12, background: T.surface2, padding: "4px 10px", borderRadius: 3, fontFamily: "Barlow Condensed" }}>
-                <span style={{ color: T.textMuted }}>Temp </span>
-                <span style={{ color: T.text }}>{imperial ? Math.round(wxFlat.tempC * 9/5 + 32) : wxFlat.tempC}{imperial ? "°F" : "°C"}</span>
-                <span style={{ color: T.textDim, marginLeft: 6, fontSize: 11 }}>ρ={rhoFromTemp(wxFlat.tempC).toFixed(3)}</span>
-              </span>
-            )}
-            {wxFlat.precipPct !== null && (
-              <span style={{ fontSize: 12, background: T.surface2, padding: "4px 10px", borderRadius: 3, fontFamily: "Barlow Condensed" }}>
-                <span style={{ color: T.textMuted }}>Precip </span>
-                <span style={{ color: wxFlat.precipPct > 50 ? T.gold : T.text }}>{wxFlat.precipPct}%</span>
-              </span>
-            )}
-            {wxFlat.windSpeedMs > 0 && (() => {
-              const effMs = wxFlat.windSpeedMs * (wxFlat.windEff / 100);
-              const effHeadMs = effMs * Math.cos(((wxFlat.windDirDeg - avgCourseBearing) * Math.PI) / 180);
-              const color = effHeadMs > 1 ? T.red : effHeadMs < -1 ? T.green : T.gold;
-              const label = effHeadMs > 1 ? "headwind" : effHeadMs < -1 ? "tailwind" : "crosswind";
-              return (
-                <span style={{ fontSize: 12, background: T.surface2, padding: "4px 10px", borderRadius: 3, fontFamily: "Barlow Condensed" }}>
-                  <span style={{ color: T.textMuted }}>Wind </span>
-                  <span style={{ color: T.text }}>{imperial ? Math.round(wxFlat.windSpeedMs * 2.237 * 10)/10 : wxFlat.windSpeedMs}{imperial ? "mph" : "m/s"} from {degToCompass(wxFlat.windDirDeg)}</span>
-                  <span style={{ color: T.textDim, marginLeft: 4 }}>({wxFlat.windEff}% eff)</span>
-                  {gpxStats && <span style={{ color, marginLeft: 6 }}>≈ {Math.abs(Math.round(effHeadMs * 10)/10)} m/s {label}</span>}
-                </span>
-              );
-            })()}
-          </div>
-        )}
-      </div>
-      )}
+      {/* B-37: the standalone "Conditions Summary" card was removed per
+          user request — the weather card above already shows everything. */}
+      <StepNav onBack={() => setStep('details')} onNext={() => setStep('pacing')} nextLabel="Pacing Strategy →" />
+      </>)}
 
-      {/* Step 2 — Pacing Strategy */}
+      {/* ═══════════════ STEP 3 — PACING (build) ═══════════════ */}
+      {step === 'pacing' && (<>
       <div className="card">
-        <div className="card-header">02 — Pacing Strategy</div>
+        <div className="card-header">03 — Pacing Strategy</div>
         <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
           {[["constant_if", "Normalized Power"], ["segments", "By Segment"], ["time_targets", "Time Target"]].map(([mode, label]) => (
             <button key={mode} className={`mode-btn${pacingMode === mode ? " active" : ""}`} onClick={() => setPacingMode(mode)}>{label}</button>
@@ -2970,7 +3090,6 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         {/* Climb Strategy */}
         {(() => {
           const detectedClimbs = gpxStats ? detectClimbs(gpxStats) : [];
-          const [climbDetailOpen, setClimbDetailOpen] = useState(false);
           const catCounts = { moderate: 0, steep: 0, wall: 0 };
           detectedClimbs.forEach(c => { catCounts[c.category] = (catCounts[c.category] || 0) + 1; });
 
@@ -3101,13 +3220,59 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
           );
         })()}
 
-        <button className="btn-primary" style={{ marginTop: 16, width: "100%" }} onClick={computePlan}>
-          Compute Pacing Plan
+        {/* B-37: Pre-race fueling lives in the Nutrition step (per user) —
+            not here. Pacing ends at Generate. */}
+        <button className="btn-primary" style={{ marginTop: 16, width: "100%" }} onClick={handleGenerate}>
+          {activeRaceId ? 'Regenerate Plan →' : 'Generate Plan →'}
         </button>
       </div>
+      <StepNav onBack={() => setStep('conditions')} />
+      </>)}
 
-      {/* Step 3 — Pacing Plan */}
-      {pacingPlan && (
+      {/* ═══════════════ REVIEW MODE ═══════════════ */}
+      {mode === 'review' && !pacingPlan && (
+        <div className="card">
+          <div className="card-header">No power plan yet</div>
+          <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6 }}>
+            This race has no computed power plan. Open{' '}
+            <button className="btn-secondary" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => setStep('pacing')}>Pacing</button>{' '}
+            and Generate one to review it here.
+          </div>
+        </div>
+      )}
+
+      {/* ── POWER REVIEW: editable pacing alongside the plan/charts ── */}
+      {step === 'power' && pacingPlan && (
+        <div className="card">
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+            <div className="card-header" style={{ margin: 0 }}>Adjust &amp; Regenerate</div>
+            <button className="btn-secondary" style={{ fontSize: 11 }} onClick={() => setStep('pacing')}>Full pacing controls →</button>
+          </div>
+          {pacingMode === 'constant_if' ? (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                <label style={{ fontSize: 12, color: T.textMuted }}>Target NP</label>
+                <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 16, color: zoneColor(targetIF) }}>{Math.round(targetIF * athlete.ftp)}w · IF {targetIF.toFixed(2)}</span>
+              </div>
+              <input type="range" min="100" max="350" step="5"
+                value={Math.round(targetIF * athlete.ftp)}
+                onChange={e => setTargetIF(Math.round((Number(e.target.value) / athlete.ftp) * 100) / 100)}
+                style={{ width: "100%" }} />
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: T.textMuted }}>
+              Pacing mode: <strong style={{ color: T.text }}>{pacingMode === 'segments' ? 'By Segment' : 'Time Target'}</strong>.
+              Use full pacing controls to adjust, then regenerate.
+            </div>
+          )}
+          <button className="btn-primary" style={{ marginTop: 14, width: "100%" }} onClick={handleGenerate}>
+            Regenerate Plan
+          </button>
+        </div>
+      )}
+
+      {/* Pacing Plan card (Power Review + Full Review) */}
+      {(step === 'power' || step === 'full') && pacingPlan && (
         <div className="card">
           <div className="card-header">03 — Pacing Plan</div>
           <div className="stat-row">
@@ -3254,10 +3419,13 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         </div>
       )}
 
-      {/* Step 4 — Nutrition */}
-      {pacingPlan && (
+      {/* ── NUTRITION (optional, resumable) — gated behind a power plan ── */}
+      {(step === 'nutrition' || step === 'full') && pacingPlan && (
         <div className="card">
-          <div className="card-header">04 — Nutrition Plan</div>
+          <div className="card-header">Nutrition Plan</div>
+          <div style={{ fontSize: 11, color: T.textDim, marginBottom: 14, lineHeight: 1.5 }}>
+            Optional and resumable — you can return to a saved power-only race anytime to build this.
+          </div>
 
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8 }}>Pre-Race Fueling</div>
@@ -3348,17 +3516,22 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         </div>
       )}
 
-      {/* RACE PLAN card */}
-      {pacingPlan && (
+      {/* RACE PLAN — explicit Update surface (B-37: no autosave; race name
+          lives in Step 1). Shown across all review steps. */}
+      {mode === 'review' && pacingPlan && (
         <div className="card">
-          <div className="card-header">Race Plan</div>
-
-          {/* Save / Update race */}
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-            <input type="text" value={planName} onChange={e => setPlanName(e.target.value)} style={{ flex: 1 }} placeholder="Race name" />
-            <button className="btn-primary" onClick={saveOrUpdateRace}>{activeRaceId ? "Update Race" : "Save Race"}</button>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+            <div className="card-header" style={{ margin: 0 }}>{planName || 'Race Plan'}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {saved && <span style={{ color: T.green, fontSize: 12 }}>✓ Saved</span>}
+              <button className="btn-primary" onClick={() => saveOrUpdateRace()}>{activeRaceId ? "Update Race" : "Save Race"}</button>
+            </div>
           </div>
-          {saved && <div style={{ color: T.green, fontSize: 12, marginBottom: 12 }}>✓ Race saved</div>}
+          {!saved && (
+            <div style={{ fontSize: 11, color: T.textDim, marginBottom: 12 }}>
+              Changes stay in memory until you press {activeRaceId ? "Update Race" : "Save Race"} — nothing auto-saves.
+            </div>
+          )}
 
           {/* Plan Details */}
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
@@ -3424,53 +3597,20 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         </div>
       )}
 
-      {/* Saved Races */}
-      {races.length > 0 && (
-        <div className="card">
-          <div className="card-header">Saved Races</div>
-          {races.map(r => (
-            <div key={r.id} style={{
-              display: "flex", alignItems: "center", gap: 8,
-              padding: "8px 10px", marginBottom: 6, borderRadius: 4,
-              background: r.id === activeRaceId ? `${T.blue}14` : T.surface2,
-              border: `1px solid ${r.id === activeRaceId ? T.blue : T.border}`,
-            }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</div>
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
-                  {r.plan?.pacingPlan
-                    ? `${minsToHHMM(r.plan.pacingPlan.correctedDurationMin ?? r.plan.pacingPlan.estimatedDurationMin)} · TSS ${r.plan.pacingPlan.tss} · IF ${r.plan.pacingPlan.ifActual?.toFixed(2)}`
-                    : "No plan computed"}
-                </div>
-              </div>
-              <span style={{
-                fontSize: 9, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.08em",
-                textTransform: "uppercase", padding: "2px 6px", borderRadius: 2, flexShrink: 0,
-                background: r.status === 'analyzed' ? `${T.green}20` : `${T.gold}20`,
-                color: r.status === 'analyzed' ? T.green : T.gold,
-              }}>
-                {r.status === 'analyzed' ? 'Analyzed' : 'Planned'}
-              </span>
-              <button className="btn-secondary" style={{ fontSize: 10, padding: "3px 8px", flexShrink: 0 }} onClick={() => onRequestSelect(r.id)}>
-                Load
-              </button>
-              <button
-                onClick={async () => {
-                  if (!window.confirm(`Delete "${r.name}"?`)) return;
-                  try {
-                    await deleteRace(r.id);
-                    setRaces(prev => prev.filter(x => x.id !== r.id));
-                    // Race is gone — reset selection directly (no save-guard;
-                    // there is nothing to save back into a deleted race).
-                    if (activeRaceId === r.id) setSelectedRaceId(null);
-                  } catch (e) { alert('Delete failed: ' + e.message); }
-                }}
-                style={{ background: "none", border: "none", color: T.textDim, fontSize: 18, cursor: "pointer", padding: "0 2px", lineHeight: 1, flexShrink: 0 }}
-              >×</button>
-            </div>
-          ))}
-        </div>
+      {/* Review-mode step navigation (breadcrumb StepRail handles arbitrary
+          jumps; this is the linear power → nutrition → full path). */}
+      {mode === 'review' && pacingPlan && (
+        <StepNav
+          onBack={step === 'nutrition' ? () => setStep('power') : step === 'full' ? () => setStep('nutrition') : null}
+          onNext={step === 'power' ? () => setStep('nutrition') : step === 'nutrition' ? () => setStep('full') : null}
+          backLabel={step === 'full' ? '← Nutrition Plan' : '← Power Plan'}
+          nextLabel={step === 'power' ? 'Build Nutrition Plan →' : 'Summary →'}
+        />
       )}
+
+      {/* B-37: the bottom-of-Model "Saved Races" list was removed. Race
+          selection now lives in the Phase-1 shared header; race management
+          (rename/delete) will live in Library. The list was redundant. */}
     </div>
   );
 }
