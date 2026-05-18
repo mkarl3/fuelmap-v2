@@ -2371,6 +2371,115 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
     if (!activeRaceId) saveOrUpdateRace(plan); // create on first Generate
   };
 
+  // ── B-37 Option C: precomputed plan sweep ────────────────────────────────
+  // Power Review's NP / Duration / IF tile-sliders don't recompute on drag —
+  // they index this cache. We sweep the FLAT-ROAD IF directly (one
+  // buildPowerStreamWithSurge per grid point, ~36 total) rather than nesting
+  // flatIFForTargetNP (which would be ~10× the work per point). Each entry
+  // keeps the full plan plus its RESULTING np / ifActual / duration, so all
+  // three sliders are just nearest-by-metric lookups into the same array.
+  // Built in the background after Generate / on load (chunked, cancellable) so
+  // Generate stays as fast as today and the UI never freezes. Only meaningful
+  // for single-knob modes (constant-NP and time-target); segment plans are
+  // read-only in review.
+  const [planSweep, setPlanSweep] = useState(null);   // sorted asc by flatIF
+  const [sweepStatus, setSweepStatus] = useState('idle'); // idle|building|ready
+  const sweepRunRef = useRef(0);
+  const sweepSigRef = useRef('');
+  const sweepSliderMode = pacingMode === 'constant_if' || pacingMode === 'time_targets';
+  // Everything that changes physics output for a given flat IF (NOT targetIF /
+  // goalTime / pacingMode — those only *select* within the sweep).
+  const sweepSig = JSON.stringify({
+    route: gpxStats ? [gpxStats.totalDistKm, gpxStats.elevGainM, gpxStats.elevLossM] : null,
+    ftp: athlete?.ftp, w: athlete?.weight, bike: [CdA, eta, tireMult, activeBike?.weight],
+    surf: surfaceMix, wx: [wxFlat.tempC, wxFlat.windSpeedMs, wxFlat.windEff, wxFlat.windDirDeg],
+    caps: climbCategories, maxP: maxPower,
+  });
+  const computePlanAtFlatIF = useCallback((flatIF, Crr, mxPwr, capsForPlan, effWindMs) => {
+    const result = buildPowerStreamWithSurge(effectiveStats, athlete, { mode: 'constant_if', targetIF: flatIF }, Crr, mxPwr, CdA, eta, activeBike.weight, rhoActual, effWindMs, wxFlat.windDirDeg, capsForPlan);
+    if (!result || (typeof result === 'object' && result.ok === false)) return null;
+    const viData = computeVI(effectiveStats, surfaceMix, result.estimatedDurationMin);
+    const plan = { ...result, ...viData, resolvedNpIF: result.ifActual };
+    return { flatIF, np: result.normalizedPower, ifActual: result.ifActual, durMin: viData.correctedDurationMin, plan };
+  }, [effectiveStats, athlete, CdA, eta, activeBike, rhoActual, wxFlat.windDirDeg, surfaceMix]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const want = !!pacingPlan && sweepSliderMode;
+    if (!want) { setPlanSweep(null); setSweepStatus('idle'); sweepSigRef.current = ''; return; }
+    if (sweepSigRef.current === sweepSig && planSweep) return; // already built for these inputs
+    const token = ++sweepRunRef.current;
+    setSweepStatus('building');
+    setPlanSweep(null);
+    const Crr = _physicsUnwrap(blendedCrr(surfaceMix, tireMult), DEFAULTS.Crr);
+    const effWindMs = wxFlat.windSpeedMs * (wxFlat.windEff / 100);
+    const mxPwr = maxPower !== '' ? Number(maxPower) : Infinity;
+    const capsForPlan = ensureClimbCapsPopulated(climbCategories, athlete?.ftp) ?? climbCategories;
+    const grid = [];
+    for (let v = 0.40; v <= 1.1001; v += 0.02) grid.push(Math.round(v * 100) / 100);
+    const out = [];
+    let i = 0;
+    const CHUNK = 3;
+    const tick = () => {
+      if (token !== sweepRunRef.current) return; // superseded (inputs changed / unmounted)
+      for (let c = 0; c < CHUNK && i < grid.length; c++, i++) {
+        const e = computePlanAtFlatIF(grid[i], Crr, mxPwr, capsForPlan, effWindMs);
+        if (e) out.push(e);
+      }
+      if (i < grid.length) { setTimeout(tick, 0); return; }
+      if (token !== sweepRunRef.current) return;
+      out.sort((a, b) => a.ifActual - b.ifActual);
+      sweepSigRef.current = sweepSig;
+      setPlanSweep(out.length ? out : null);
+      setSweepStatus(out.length ? 'ready' : 'idle');
+    };
+    setTimeout(tick, 0);
+    return () => { sweepRunRef.current++; }; // cancel in-flight on deps change/unmount
+  }, [sweepSig, !!pacingPlan, sweepSliderMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Pick the cached plan whose `metric` is nearest `val` and apply it. targetIF
+  // (the NP-IF the reload path re-converges to) tracks the chosen plan so a
+  // saved+reloaded race lands on the same plan; planSig change marks dirty so
+  // the explicit-Update model + B-36 guard still work.
+  // ONE slider for the whole plan (NP/IF/Duration are one degree of freedom —
+  // three controls for one axis was redundant). Index-based over the sweep
+  // (sorted asc by ifActual); the metric tiles are live readouts. Renders only
+  // once the background sweep is ready (constant-NP / time-target only).
+  const sweepReady = sweepSliderMode && sweepStatus === 'ready' && planSweep && planSweep.length > 1;
+  const sweepIdx = (() => {
+    if (!sweepReady || !pacingPlan) return 0;
+    let bi = 0, bd = Infinity;
+    planSweep.forEach((e, i) => { const d = Math.abs(e.ifActual - pacingPlan.ifActual); if (d < bd) { bd = d; bi = i; } });
+    return bi;
+  })();
+  const sweepSlider = () => {
+    if (!sweepReady) return null;
+    const lo = planSweep[0], hi = planSweep[planSweep.length - 1];
+    return (
+      <div style={{ marginTop: 10, marginBottom: 4 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+          <span style={{ fontSize: 11, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            Retune Plan
+          </span>
+          <span style={{ fontSize: 11, color: T.textDim, fontFamily: "Barlow Condensed" }}>
+            {minsToHHMM(pacingPlan.correctedDurationMin)} · {pacingPlan.normalizedPower}w · IF {pacingPlan.ifActual.toFixed(2)}
+          </span>
+        </div>
+        <input type="range" min={0} max={planSweep.length - 1} step={1}
+          value={sweepIdx}
+          onChange={e => {
+            const ent = planSweep[Number(e.target.value)];
+            if (!ent) return;
+            setPacingPlan(ent.plan);
+            setTargetIF(Math.round(ent.ifActual * 100) / 100);
+          }}
+          style={{ width: "100%", accentColor: T.blue, cursor: "ew-resize" }} />
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: T.textDim, marginTop: 2 }}>
+          <span>{minsToHHMM(lo.durMin)} · {lo.np}w</span>
+          <span>{hi.np}w · {minsToHHMM(hi.durMin)}</span>
+        </div>
+      </div>
+    );
+  };
+
   const overlayData = pacingPlan
     ? buildNutritionOverlay(pacingPlan.powerStream, intakeEvents, athlete, fuelingScale(preRaceFueling), 1) : [];
   // CC#7 (Prompt 4B Step 2): prefer per-second stream at dt=1 for PLAN-side
@@ -3241,35 +3350,9 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
         </div>
       )}
 
-      {/* ── POWER REVIEW: editable pacing alongside the plan/charts ── */}
-      {step === 'power' && pacingPlan && (
-        <div className="card">
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-            <div className="card-header" style={{ margin: 0 }}>Adjust &amp; Regenerate</div>
-            <button className="btn-secondary" style={{ fontSize: 11 }} onClick={() => setStep('pacing')}>Full pacing controls →</button>
-          </div>
-          {pacingMode === 'constant_if' ? (
-            <div>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                <label style={{ fontSize: 12, color: T.textMuted }}>Target NP</label>
-                <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, fontSize: 16, color: zoneColor(targetIF) }}>{Math.round(targetIF * athlete.ftp)}w · IF {targetIF.toFixed(2)}</span>
-              </div>
-              <input type="range" min="100" max="350" step="5"
-                value={Math.round(targetIF * athlete.ftp)}
-                onChange={e => setTargetIF(Math.round((Number(e.target.value) / athlete.ftp) * 100) / 100)}
-                style={{ width: "100%" }} />
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, color: T.textMuted }}>
-              Pacing mode: <strong style={{ color: T.text }}>{pacingMode === 'segments' ? 'By Segment' : 'Time Target'}</strong>.
-              Use full pacing controls to adjust, then regenerate.
-            </div>
-          )}
-          <button className="btn-primary" style={{ marginTop: 14, width: "100%" }} onClick={handleGenerate}>
-            Regenerate Plan
-          </button>
-        </div>
-      )}
+      {/* B-37 Option C: no status strip (user-removed). The retune slider sits
+          above the power chart; tiles are live readouts. Segment plans simply
+          show no slider (read-only in review). */}
 
       {/* Pacing Plan card (Power Review + Full Review) */}
       {(step === 'power' || step === 'full') && pacingPlan && (
@@ -3316,6 +3399,10 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             );
           })()}
 
+          {/* B-37 Option C: ONE slider drives the whole plan (the tiles above
+              are live readouts). Sits ABOVE the chart; indexes the precomputed
+              sweep — instant. */}
+          {sweepSlider()}
           <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 6, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>
             Elevation + Power
           </div>
