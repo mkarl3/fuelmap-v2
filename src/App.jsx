@@ -6421,6 +6421,418 @@ function RaceHeader({ races, selectedRaceId, onRequestSelect, tab, athletes, bik
   );
 }
 
+// ─── B-38: SAVED RACES (manage-only) ──────────────────────────────────────────
+// Manage-only surface: rename / delete / group / preview. Does NOT load a race
+// as active — that stays with the global header selector (B-36). Reads the
+// correct source per race state (FIT if present, else GPX/plan) and omits
+// absent data rather than showing "—".
+function raceSummary(race, athletes) {
+  const hasFit  = !!race.fit;
+  const hasPlan = !!race.plan?.pacingPlan;
+  const route   = race.plan?.route ?? null;
+  const ftp = race.athleteSnapshot?.ftp ?? athletes.find(a => a.id === race.athleteId)?.ftp ?? null;
+  const athleteName = race.athleteSnapshot?.name ?? athletes.find(a => a.id === race.athleteId)?.name ?? null;
+
+  // distance: FIT first, else GPX  (B-38 follow-up: location row value removed
+  // per user — it was lat/lon, read as noise.)
+  let distKm = null;
+  if (hasFit) {
+    const ds = race.fit.movingDistSeries;
+    if (Array.isArray(ds) && ds.length) distKm = ds.reduce((s, d) => s + (d || 0), 0) / 1000;
+  }
+  if (distKm == null && route?.totalDistKm != null) distKm = route.totalDistKm;
+
+  // Race date: ACTUAL ride date from the FIT when present (same derivation as
+  // the weather feature), else the planned race date. ISO 'YYYY-MM-DD'.
+  let raceDateISO = null;
+  if (hasFit) {
+    const ms = race.fit.laps?.[0]?.startTimeMs ?? race.fit.fullGPSPath?.[0]?.timestamp ?? null;
+    if (Number.isFinite(ms)) { const d = new Date(ms); if (!isNaN(d)) raceDateISO = d.toISOString().slice(0, 10); }
+  }
+  if (!raceDateISO && race.plan?.raceDate) raceDateISO = race.plan.raceDate;
+
+  // NP / IF / duration: FIT → actual; else plan → planned
+  let perf = null;
+  if (hasFit && Number.isFinite(race.fit.rawNP)) {
+    perf = { kind: 'actual',
+      np: Math.round(race.fit.rawNP),
+      if: ftp ? Math.round(race.fit.rawNP / ftp * 100) / 100 : null,
+      durMin: race.fit.movingMin ?? race.fit.elapsedMin ?? null };
+  } else if (hasPlan) {
+    const p = race.plan.pacingPlan;
+    perf = { kind: 'planned',
+      np: p.normalizedPower ?? null,
+      if: p.ifActual ?? null,
+      durMin: p.correctedDurationMin ?? p.estimatedDurationMin ?? null };
+  }
+
+  // elevation profile: FIT alt series, else GPX elevProfile
+  let elevProfile = null;
+  if (hasFit && Array.isArray(race.fit.movingAltSeries) && race.fit.movingAltSeries.length) {
+    const alt = race.fit.movingAltSeries, dd = race.fit.movingDistSeries || [];
+    const pts = []; let cum = 0;
+    const stride = Math.max(1, Math.floor(alt.length / 160));
+    for (let i = 0; i < alt.length; i++) {
+      cum += dd[i] || 0;
+      if (i % stride === 0 && alt[i] != null && isFinite(alt[i])) pts.push({ dist: cum / 1000, ele: alt[i] });
+    }
+    if (pts.length > 1) elevProfile = pts;
+  }
+  if (!elevProfile && Array.isArray(route?.elevProfile) && route.elevProfile.length > 1) {
+    elevProfile = route.elevProfile;
+  }
+
+  const state = hasPlan && hasFit ? 'Plan + Ride' : hasFit ? 'Ride only' : hasPlan ? 'Plan only' : 'Empty';
+  return { hasFit, hasPlan, athleteName, raceDateISO, distKm, perf, elevProfile, state };
+}
+
+// Locale-ish date format per unit pref: imperial → MM/DD/YYYY, metric → DD.MM.YYYY.
+function fmtRaceDate(iso, imperial) {
+  if (!iso) return null;
+  const [y, m, d] = iso.split('-');
+  if (!y || !m || !d) return iso;
+  return imperial ? `${m}/${d}/${y}` : `${d}.${m}.${y}`;
+}
+
+// B-38 follow-up: race edit modal — name + event + linked-data management
+// (delete-only; original .gpx/.fit binaries were never stored, only parsed
+// derivatives, so there is nothing to download).
+function RaceEditModal({ race, events, onClose, onSaveMeta, onCreateEvent, onDeleteComponent }) {
+  const [name, setName] = useState(race.name);
+  const [eventId, setEventId] = useState(race.eventId ?? '');
+  const hasPlan = !!race.plan?.pacingPlan;
+  const hasFit  = !!race.fit;
+  const planIntakeN = race.plan?.nutritionPlan?.intakeEvents?.length || 0;
+  const fitIntakeN  = race.analyzeData?.actualIntake?.length || 0;
+  const row = (label, present, detail, onDel, delLabel) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 4, marginBottom: 8 }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: present ? T.text : T.textDim }}>{label}</div>
+        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{present ? detail : "Not present"}</div>
+      </div>
+      {present && (
+        <button className="btn-secondary" style={{ fontSize: 11, color: T.red, borderColor: T.red }}
+          onClick={() => { if (window.confirm(`${delLabel} from "${race.name}"? This cannot be undone.`)) onDel(); }}>
+          Delete
+        </button>
+      )}
+    </div>
+  );
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 120, padding: 20 }}>
+      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: 24, width: 460, maxWidth: "100%", maxHeight: "90vh", overflowY: "auto" }}>
+        <div className="card-header" style={{ marginBottom: 16 }}>Edit Race</div>
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Race Name</label>
+          <input type="text" value={name} onChange={e => setName(e.target.value)} style={{ width: "100%" }} />
+        </div>
+        <div style={{ marginBottom: 18 }}>
+          <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Event</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select value={eventId} onChange={e => setEventId(e.target.value ? Number(e.target.value) : '')} style={{ flex: 1 }}>
+              <option value="">No event</option>
+              {events.map(ev => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
+            </select>
+            <button className="btn-secondary" style={{ fontSize: 11 }} onClick={() => { const id = onCreateEvent(); if (id) setEventId(id); }}>+ New</button>
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: T.textMuted, fontFamily: "Barlow Condensed", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>Linked Data</div>
+        {/* Nutrition is NOT a standalone item: the Model-side nutrition plan
+            lives with the power plan; the Analyze-side intake log lives with
+            the ride (FIT). Deleting a parent deletes its nutrition with it. */}
+        {row("Power plan", hasPlan,
+          hasPlan
+            ? `${race.plan.pacingPlan.normalizedPower ?? '?'}w NP · IF ${race.plan.pacingPlan.ifActual?.toFixed(2) ?? '?'}${planIntakeN ? ` · incl. ${planIntakeN} fuel event${planIntakeN === 1 ? '' : 's'}` : ''}`
+            : '',
+          () => onDeleteComponent('plan'), "Delete the power plan and its nutrition plan")}
+        {row("Ride data (FIT)", hasFit,
+          hasFit
+            ? `${race.fit.fileName ?? 'FIT'} · ${race.fit.movingMin ?? race.fit.elapsedMin ?? '?'} min${fitIntakeN ? ` · incl. ${fitIntakeN} logged intake` : ''}`
+            : '',
+          () => onDeleteComponent('fit'), "Delete the ride (FIT) data and its logged intake")}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
+          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={() => onSaveMeta({ name: name.trim() || race.name, eventId: eventId || null })}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SavedRacesTab({ races, setRaces, athletes, imperial, selectedRaceId, setSelectedRaceId, events, setEvents, onRequestSelect, setTab }) {
+  const [expandedId, setExpandedId] = useState(null);
+  const [editingRace, setEditingRace] = useState(null);
+  const [groupMode, setGroupMode] = useState('date'); // 'date' | 'event'
+  const [filterEventId, setFilterEventId] = useState('');   // '' = all
+
+  const eventName = id => events.find(e => e.id === id)?.name ?? null;
+
+  const doDelete = async (race) => {
+    if (!window.confirm(`Delete "${race.name}"? This permanently removes its plan, ride (FIT), and intake data. This cannot be undone.`)) return;
+    try {
+      await deleteRace(race.id);
+      setRaces(prev => prev.filter(r => r.id !== race.id));
+      if (selectedRaceId === race.id) setSelectedRaceId(null); // was active → clear
+      if (editingRace?.id === race.id) setEditingRace(null);
+    } catch (e) { alert('Delete failed: ' + e.message); }
+  };
+
+  // Returns the new event id so the edit modal's "+ New" can select it.
+  const createEvent = () => {
+    const name = (window.prompt('New event name (e.g. "Barry Roubaix"):') || '').trim();
+    if (!name) return null;
+    const existing = events.find(e => e.name.toLowerCase() === name.toLowerCase());
+    if (existing) return existing.id;
+    const id = Date.now();
+    setEvents(prev => [...prev, { id, name }]);
+    return id;
+  };
+
+  const saveMeta = async (race, { name, eventId }) => {
+    try {
+      await updateRace(race.id, { name, eventId, updatedAt: new Date().toISOString() });
+      setRaces(prev => prev.map(r => r.id === race.id ? { ...r, name, eventId } : r));
+      setEditingRace(null);
+    } catch (e) { alert('Save failed: ' + e.message); }
+  };
+
+  const deleteComponent = async (race, which) => {
+    // Nutrition is coupled to its parent, not standalone: the Model-side
+    // nutrition plan goes with the power plan; the Analyze-side intake log
+    // goes with the ride (FIT).
+    let patch = {};
+    if (which === 'fit') {
+      patch = {
+        fit: null,
+        status: race.plan?.pacingPlan ? 'planned' : race.status,
+        analyzeData: { ...(race.analyzeData ?? {}), actualIntake: [] }, // ride's logged intake
+      };
+    } else if (which === 'plan') {
+      patch = {
+        plan: {
+          ...race.plan,
+          pacingPlan: null,
+          nutritionPlan: { preRaceFueling: PRE_RACE_FUELING_DEFAULT_ID, intakeEvents: [] }, // plan's nutrition
+        },
+      };
+    }
+    try {
+      await updateRace(race.id, { ...patch, updatedAt: new Date().toISOString() });
+      let next = null;
+      setRaces(prev => prev.map(r => { if (r.id === race.id) { next = { ...r, ...patch }; return next; } return r; }));
+      if (next) setEditingRace(next); // keep modal in sync
+    } catch (e) { alert('Delete failed: ' + e.message); }
+  };
+
+  const loadRace = (race) => {
+    // Routes through the GLOBAL guarded selector (B-36) — not a separate
+    // selection path — then jumps to the relevant tab. FIT → Analyze;
+    // otherwise Model (a plan-bearing race opens at Power Plan via loadRace).
+    onRequestSelect?.(race.id);
+    setTab?.(race.fit ? 'ANALYZE' : 'MODEL');
+  };
+
+  const distLabel = (km) => km == null ? null
+    : `${imperial ? Math.round(km * 0.621 * 10) / 10 : Math.round(km * 10) / 10} ${imperial ? 'mi' : 'km'}`;
+
+  // Precompute summaries once; sort by race date (FIT-else-plan), newest first,
+  // undated last.
+  const list = races.map(r => ({ race: r, s: raceSummary(r, athletes) }));
+  list.sort((a, b) => {
+    const da = a.s.raceDateISO || '', db = b.s.raceDateISO || '';
+    if (da && db) return db.localeCompare(da);
+    return da ? -1 : db ? 1 : 0;
+  });
+  const filtered = filterEventId ? list.filter(x => String(x.race.eventId ?? '') === filterEventId) : list;
+
+  const Row = ({ race, s }) => {
+    const open = expandedId === race.id;
+    const evName = eventName(race.eventId);
+    const bits = [];
+    const dstr = fmtRaceDate(s.raceDateISO, imperial);
+    if (dstr) bits.push(dstr);
+    if (s.athleteName) bits.push(s.athleteName);
+    if (distLabel(s.distKm)) bits.push(distLabel(s.distKm));
+    return (
+      <div key={race.id} style={{ border: `1px solid ${race.id === selectedRaceId ? T.blue : T.border}`, borderRadius: 6, marginBottom: 8, background: T.surface2, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px' }}>
+          <button onClick={() => setExpandedId(open ? null : race.id)}
+            style={{ background: 'none', border: 'none', color: T.textDim, cursor: 'pointer', fontSize: 12, width: 16, flexShrink: 0 }}>
+            {open ? '▼' : '▶'}
+          </button>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {race.name}
+              {evName && <span style={{ fontSize: 10, fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: T.blue, background: `${T.blue}1A`, padding: '1px 6px', borderRadius: 3, marginLeft: 8 }}>{evName}</span>}
+            </div>
+            {bits.length > 0 && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{bits.join(' · ')}</div>}
+          </div>
+          <span style={{ fontSize: 9, fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '2px 7px', borderRadius: 3, flexShrink: 0,
+            background: s.state === 'Plan + Ride' ? `${T.green}20` : s.hasFit ? `${T.blue}20` : `${T.gold}20`,
+            color: s.state === 'Plan + Ride' ? T.green : s.hasFit ? T.blue : T.gold }}>{s.state}</span>
+          {(s.hasFit || s.hasPlan) && (
+            <button className="btn-secondary" style={{ fontSize: 10, padding: '3px 8px', flexShrink: 0 }}
+              title={s.hasFit ? 'Open in Analyze' : 'Open in Model'}
+              onClick={() => loadRace(race)}>Load</button>
+          )}
+          <button className="btn-secondary" style={{ fontSize: 10, padding: '3px 8px', flexShrink: 0 }}
+            onClick={() => setEditingRace(race)}>✎ Edit</button>
+          <button onClick={() => doDelete(race)} title="Delete race"
+            style={{ background: 'none', border: 'none', color: T.textDim, fontSize: 16, cursor: 'pointer', padding: '0 2px', lineHeight: 1, flexShrink: 0 }}>×</button>
+        </div>
+        {open && (
+          <div style={{ borderTop: `1px solid ${T.border}`, padding: '12px 14px', background: T.surface }}>
+            {s.perf ? (
+              <div style={{ display: 'flex', gap: 10, marginBottom: s.elevProfile ? 12 : 0, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 9, fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: s.perf.kind === 'actual' ? T.blue : T.gold, alignSelf: 'center' }}>
+                  {s.perf.kind === 'actual' ? 'Actual' : 'Planned'}
+                </span>
+                {s.perf.durMin != null && <div className="stat-box"><div className="stat-label">{s.perf.kind === 'actual' ? 'Moving Time' : 'Duration'}</div><div className="stat-value" style={{ fontSize: 17 }}>{minsToHHMM(s.perf.durMin)}</div></div>}
+                {s.perf.np != null && <div className="stat-box"><div className="stat-label">NP</div><div className="stat-value">{s.perf.np}<span className="stat-unit">w</span></div></div>}
+                {s.perf.if != null && <div className="stat-box"><div className="stat-label">IF</div><div className="stat-value">{s.perf.if.toFixed(2)}</div></div>}
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: T.textDim, marginBottom: s.elevProfile ? 12 : 0 }}>No power data yet — add a plan in Model or a FIT in Analyze.</div>
+            )}
+            {s.elevProfile && (() => {
+              const distU = imperial ? 'mi' : 'km', eleU = imperial ? 'ft' : 'm', rnd = imperial ? 50 : 10;
+              const data = s.elevProfile.map(p => ({ dist: imperial ? Math.round(p.dist * 0.621 * 10) / 10 : Math.round(p.dist * 10) / 10, ele: imperial ? Math.round(p.ele * 3.281) : Math.round(p.ele) }));
+              const evs = data.map(p => p.ele);
+              const lo = Math.floor(Math.min(...evs) / rnd) * rnd, hi = Math.ceil(Math.max(...evs) / rnd) * rnd;
+              return (
+                <div style={{ height: 110 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+                      <XAxis dataKey="dist" tick={{ fill: T.textDim, fontSize: 10 }} tickFormatter={v => `${Math.round(v)}${distU}`} tickCount={6} />
+                      <YAxis domain={[lo, hi]} tick={{ fill: T.textDim, fontSize: 10 }} width={36} tickFormatter={v => `${v}${eleU}`} />
+                      <Area type="monotone" dataKey="ele" stroke="rgba(120,120,120,0.6)" fill="rgba(80,80,80,0.3)" dot={false} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              );
+            })()}
+            <div style={{ fontSize: 10, color: T.textDim, marginTop: 8 }}>Read-only overview. Select this race in the header to edit it in Model / Analyze.</div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const Toggle = () => (
+    <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: 4, overflow: 'hidden' }}>
+      {[['date', 'Date'], ['event', 'Event']].map(([id, label]) => (
+        <button key={id} onClick={() => setGroupMode(id)}
+          style={{ background: groupMode === id ? T.blue : 'transparent', color: groupMode === id ? '#fff' : T.textMuted,
+            border: 'none', padding: '5px 12px', cursor: 'pointer', fontFamily: 'Barlow Condensed', fontWeight: 700,
+            fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{label}</button>
+      ))}
+    </div>
+  );
+
+  const Group = (label, count, items) => (
+    <div key={label} style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 11, fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.textDim, marginBottom: 6 }}>
+        {label} <span style={{ color: T.textDim }}>· {count}</span>
+      </div>
+      {items.map(x => <Row key={x.race.id} race={x.race} s={x.s} />)}
+    </div>
+  );
+
+  let body;
+  if (races.length === 0) {
+    body = <div style={{ fontSize: 13, color: T.textMuted, padding: '20px 0', textAlign: 'center' }}>No saved races.</div>;
+  } else if (filtered.length === 0) {
+    body = <div style={{ fontSize: 13, color: T.textMuted, padding: '16px 0', textAlign: 'center' }}>No races in this event.</div>;
+  } else if (groupMode === 'event') {
+    const groups = new Map();
+    for (const x of filtered) {
+      const key = x.race.eventId ?? '__none__';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(x);
+    }
+    const order = [...events.map(e => e.id), '__none__'].filter(k => groups.has(k));
+    body = order.map(key => Group(key === '__none__' ? 'No event' : (eventName(key) ?? 'Event'), groups.get(key).length, groups.get(key)));
+  } else {
+    // Group by year (descending); undated last.
+    const groups = new Map();
+    for (const x of filtered) {
+      const yr = x.s.raceDateISO ? x.s.raceDateISO.slice(0, 4) : '__nodate__';
+      if (!groups.has(yr)) groups.set(yr, []);
+      groups.get(yr).push(x);
+    }
+    const years = [...groups.keys()].filter(k => k !== '__nodate__').sort((a, b) => b.localeCompare(a));
+    if (groups.has('__nodate__')) years.push('__nodate__');
+    body = years.map(yr => Group(yr === '__nodate__' ? 'No date' : yr, groups.get(yr).length, groups.get(yr)));
+  }
+
+  return (
+    <div>
+      {editingRace && (
+        <RaceEditModal
+          race={editingRace}
+          events={events}
+          onClose={() => setEditingRace(null)}
+          onSaveMeta={(meta) => saveMeta(editingRace, meta)}
+          onCreateEvent={createEvent}
+          onDeleteComponent={(which) => deleteComponent(editingRace, which)} />
+      )}
+      <div className="card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+          <div className="card-header" style={{ margin: 0 }}>Saved Races</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 10, color: T.textDim, fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Group by</span>
+            <Toggle />
+            <select value={filterEventId} onChange={e => setFilterEventId(e.target.value)} style={{ fontSize: 11 }}>
+              <option value="">All events</option>
+              {events.map(ev => <option key={ev.id} value={String(ev.id)}>{ev.name}</option>)}
+            </select>
+            <button className="btn-secondary" style={{ fontSize: 11 }} onClick={createEvent}>+ New event</button>
+          </div>
+        </div>
+        {body}
+      </div>
+    </div>
+  );
+}
+
+// B-38: Library is a four-sub-tab container. Athletes / Gear / Nutrition are
+// relocations of the existing management UIs (unchanged); Saved Races is new.
+// All four panels stay mounted (display-toggled) so each keeps its in-session
+// state across sub-tab switches — same model as the top-level tab bar.
+function LibraryHub(props) {
+  const [sub, setSub] = useState('athletes');
+  const SUBS = [['athletes', 'Athletes'], ['gear', 'Gear'], ['nutrition', 'Nutrition'], ['races', 'Saved Races']];
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: `1px solid ${T.border}` }}>
+        {SUBS.map(([id, label]) => (
+          <button key={id} onClick={() => setSub(id)}
+            style={{ background: 'none', border: 'none', borderBottom: `2px solid ${sub === id ? T.red : 'transparent'}`,
+              color: sub === id ? T.text : T.textMuted, padding: '8px 14px', cursor: 'pointer',
+              fontFamily: 'Barlow Condensed', fontWeight: 700, fontSize: 13, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div style={{ display: sub === 'athletes' ? undefined : 'none' }}>
+        <AthletesTab athletes={props.athletes} setAthletes={props.setAthletes} activeAthleteId={props.activeAthleteId} setActiveAthleteId={props.setActiveAthleteId} imperial={props.imperial} bikes={props.bikes} setBikes={props.setBikes} activeBikeId={props.activeBikeId} setActiveBikeId={props.setActiveBikeId} />
+      </div>
+      <div style={{ display: sub === 'gear' ? undefined : 'none' }}>
+        <BikesTab bikes={props.bikes} setBikes={props.setBikes} activeBikeId={props.activeBikeId} setActiveBikeId={props.setActiveBikeId} imperial={props.imperial} />
+      </div>
+      <div style={{ display: sub === 'nutrition' ? undefined : 'none' }}>
+        <LibraryTab products={props.products} setProducts={props.setProducts} />
+      </div>
+      <div style={{ display: sub === 'races' ? undefined : 'none' }}>
+        <SavedRacesTab races={props.races} setRaces={props.setRaces} athletes={props.athletes} imperial={props.imperial}
+          selectedRaceId={props.selectedRaceId} setSelectedRaceId={props.setSelectedRaceId}
+          events={props.events} setEvents={props.setEvents}
+          onRequestSelect={props.onRequestSelect} setTab={props.setTab} />
+      </div>
+    </div>
+  );
+}
+
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 function lsGet(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
@@ -6435,6 +6847,11 @@ export default function App() {
   const [bikes, setBikes] = useState(() => lsGet('fm_bikes', [DEFAULT_BIKE]));
   const [activeBikeId, setActiveBikeId] = useState(() => lsGet('fm_activeBikeId', 1));
   const [products, setProducts] = useState(() => lsGet('fm_products', DEFAULT_PRODUCTS));
+  // B-38: local "events" — named groupings of recurring races (e.g. "Barry
+  // Roubaix" across years). Purely local (same localStorage pattern as
+  // athletes/bikes/products); first-class so future event work is additive.
+  // Each: { id, name }. A race optionally carries race.eventId (absent = none).
+  const [events, setEvents] = useState(() => lsGet('fm_events', []));
   const [races, setRaces] = useState([]);
 
   // B-36: ONE app-wide selected race (was two disagreeing per-tab selectors).
@@ -6475,6 +6892,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem('fm_bikes',           JSON.stringify(bikes));           }, [bikes]);
   useEffect(() => { localStorage.setItem('fm_activeBikeId',    JSON.stringify(activeBikeId));    }, [activeBikeId]);
   useEffect(() => { localStorage.setItem('fm_products',        JSON.stringify(products));        }, [products]);
+  useEffect(() => { localStorage.setItem('fm_events',          JSON.stringify(events));          }, [events]);
 
   // Load races from IndexedDB on mount
   useEffect(() => {
@@ -6509,7 +6927,7 @@ export default function App() {
 
             {/* Tabs */}
             <div style={{ display: "flex", flex: 1 }}>
-              {["MODEL", "ANALYZE", "PERFORM", "ATHLETES", "GEAR", "LIBRARY"].map(t => (
+              {["MODEL", "ANALYZE", "PERFORM", "LIBRARY"].map(t => (
                 <button key={t} className={`tab-btn${tab === t ? " active" : ""}`} onClick={() => setTab(t)}>{t}</button>
               ))}
             </div>
@@ -6572,14 +6990,13 @@ export default function App() {
               </div>
             </div>
           </div>
-          <div style={{ display: tab === "ATHLETES" ? undefined : "none" }}>
-            <AthletesTab athletes={athletes} setAthletes={setAthletes} activeAthleteId={activeAthleteId} setActiveAthleteId={setActiveAthleteId} imperial={imperial} bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} />
-          </div>
-          <div style={{ display: tab === "GEAR"     ? undefined : "none" }}>
-            <BikesTab bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId} imperial={imperial} />
-          </div>
           <div style={{ display: tab === "LIBRARY"  ? undefined : "none" }}>
-            <LibraryTab products={products} setProducts={setProducts} />
+            <LibraryHub
+              athletes={athletes} setAthletes={setAthletes} activeAthleteId={activeAthleteId} setActiveAthleteId={setActiveAthleteId}
+              bikes={bikes} setBikes={setBikes} activeBikeId={activeBikeId} setActiveBikeId={setActiveBikeId}
+              products={products} setProducts={setProducts} imperial={imperial}
+              races={races} setRaces={setRaces} selectedRaceId={selectedRaceId} setSelectedRaceId={setSelectedRaceId}
+              events={events} setEvents={setEvents} onRequestSelect={requestSelectRace} setTab={setTab} />
           </div>
         </div>
       </div>
