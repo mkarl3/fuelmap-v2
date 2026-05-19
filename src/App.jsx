@@ -1255,11 +1255,37 @@ function GlycogenChart({ overlayData, athlete, durationMin, estimatedDurationMin
   );
 }
 
+// ─── MODELED-ESTIMATE HONESTY ────────────────────────────────────────────────
+// Generalizes the B-22 single-string caption pattern. ONE editable copy source
+// per model; ONE reusable caption element rendered below every W'bal/Glycogen
+// chart (PLAN and ANALYZE alike). Captions + alert wording together keep these
+// uncalibrated model outputs from speaking in the voice of measured fact.
+const MODELED_CAPTION = {
+  // (was B-22 WBAL_ADVISORY_TEXT — unchanged copy, now one of a set)
+  wbal: "Predicted W'bal doesn't account for unmodeled surges from group dynamics, attacks, or other in-race variability. Use as a directional estimate.",
+  glycogen: "Modeled glycogen reserve is an estimate from power and assumed fueling, not a measurement — and real-world digestion and substrate use vary. Use as a directional estimate.",
+};
+function ModeledEstimateCaption({ model }) {
+  const text = MODELED_CAPTION[model] ?? MODELED_CAPTION.wbal;
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 8, borderTop: `0.5px solid ${T.border}`, paddingTop: 10, marginTop: 8, fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
+      <span aria-hidden="true" style={{ flexShrink: 0, fontSize: 14, color: T.textDim, lineHeight: 1 }}>ⓘ</span>
+      <span>{text}</span>
+    </div>
+  );
+}
+// Coarsen a modeled concern's timing to a ride phase — no minute-level claims
+// in alert TEXT (the charts still show fine-grained data). Stays actionable:
+// the rider still learns which part of the ride to act in.
+function ridePhase(timeMin, totalMin) {
+  if (!(totalMin > 0) || !(timeMin >= 0)) return "during the ride";
+  const f = timeMin / totalMin;
+  if (f < 0.34) return "the opening third";
+  if (f < 0.67) return "the middle third";
+  return "the final third";
+}
+
 // ─── W'BAL CHART ──────────────────────────────────────────────────────────────
-// B-22: PLAN-tab W'bal advisory caption. Always present below the PLAN W'bal
-// chart; NOT shown on ANALYZE tab. Declared once so future copy iterations are
-// a single-edit change.
-const WBAL_ADVISORY_TEXT = "Predicted W'bal doesn't account for unmodeled surges from group dynamics, attacks, or other in-race variability. Use as a directional estimate.";
 
 function WbalChart({ wbalData, athlete, gpxStats = null, imperial = false, durationMin, estimatedDurationMin }) {
   if (!wbalData || wbalData.length === 0) return null;
@@ -2708,12 +2734,15 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
       const critPt = wbalData.find(d => d.wbalPct <= 20);
       const warnPt = wbalData.find(d => d.wbalPct <= 40);
       const minWbal = Math.min(...wbalData.map(d => d.wbal));
+      // Modeled-estimate honesty: coarsen timing to ride phase (no minute
+      // claims) and drop hard-certainty framing. Chart still shows fine data.
+      const wbalTotalMin = wbalData[wbalData.length - 1]?.time ?? pacingPlan?.estimatedDurationMin ?? 0;
       if (depletedPt) {
-        alerts.push({ type: "danger", msg: `W' fully depleted at ${minsToHHMM(depletedPt.time)} — plan requires more anaerobic capacity than you have. Reduce power ceiling or IF.` });
+        alerts.push({ type: "danger", msg: `Predicted W'bal fully depletes in ${ridePhase(depletedPt.time, wbalTotalMin)} — the plan models more anaerobic demand than your capacity. Consider lowering the power ceiling or IF.` });
       } else if (critPt) {
-        alerts.push({ type: "danger", msg: `W' drops to critical level (${critPt.wbalPct}%) at ${minsToHHMM(critPt.time)}. High blowup risk late in the ride.` });
+        alerts.push({ type: "danger", msg: `Predicted W'bal approaches its reserve floor (~${critPt.wbalPct}%) in ${ridePhase(critPt.time, wbalTotalMin)} — elevated blow-up risk modeled. Consider a power ceiling on climbs.` });
       } else if (warnPt) {
-        alerts.push({ type: "warn", msg: `W' drops below 40% at ${minsToHHMM(warnPt.time)} (min: ${Math.round(minWbal/1000*10)/10}kJ). Consider a power ceiling on climbs.` });
+        alerts.push({ type: "warn", msg: `Predicted W'bal dips below 40% in ${ridePhase(warnPt.time, wbalTotalMin)} (modeled low ≈ ${Math.round(minWbal/1000*10)/10} kJ). Consider a power ceiling on climbs.` });
       }
     }
   }
@@ -3412,11 +3441,8 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
             W' Balance
           </div>
           <WbalChart wbalData={wbalData} athlete={athlete} gpxStats={gpxStats} imperial={imperial} durationMin={pacingPlan.correctedDurationMin} estimatedDurationMin={pacingPlan.estimatedDurationMin} />
-          {/* B-22: advisory caption — PLAN tab only */}
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 8, borderTop: `0.5px solid ${T.border}`, paddingTop: 10, marginTop: 8, fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
-            <span aria-hidden="true" style={{ flexShrink: 0, fontSize: 14, color: T.textDim, lineHeight: 1 }}>ⓘ</span>
-            <span>{WBAL_ADVISORY_TEXT}</span>
-          </div>
+          {/* Modeled-estimate caption (generalized B-22) — PLAN W'bal */}
+          <ModeledEstimateCaption model="wbal" />
 
           {alerts.map((a, i) => (
             <div key={i} className={`alert alert-${a.type}`} style={{ marginTop: 8 }}>⚠ {a.msg}</div>
@@ -3548,6 +3574,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
               <BurnRateChart overlayData={overlayData} durationMin={pacingPlan?.correctedDurationMin} blockMin={2} estimatedDurationMin={pacingPlan?.estimatedDurationMin} preRaceMealG={fuelingMealCarbsG(preRaceFueling, athlete.weight)} maxIntakeGPerHr={athlete.maxCarbIntakeGPerHr ?? 90} />
               <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Glycogen Reserve</div>
               <GlycogenChart overlayData={overlayData} athlete={athlete} durationMin={pacingPlan.correctedDurationMin} estimatedDurationMin={pacingPlan.estimatedDurationMin} />
+              <ModeledEstimateCaption model="glycogen" />
               <div style={{ marginTop: 12, padding: "10px 14px", background: T.surface2, borderRadius: 4, fontSize: 12 }}>
                 <span style={{ color: T.textMuted }}>Total in-ride carbs: </span>
                 <span style={{ fontFamily: "Barlow Condensed", fontWeight: 700, color: T.blue }}>
@@ -3569,6 +3596,7 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                 const bonkPt = overlayData.find(d => d.reservePct < 10);
                 const warnPt = overlayData.find(d => d.reservePct < 30);
                 const overLimitPt = overlayData.find(d => d.overLimit > 0);
+                const glyTotalMin = overlayData[overlayData.length - 1]?.time ?? pacingPlan?.estimatedDurationMin ?? 0;
                 // B-27: gut backlog sustained — gut pool above 50g for ≥10 min.
                 // Body is processing slower than intake; recommend spacing fuel.
                 let gutBacklogSustainedPt = null;
@@ -3586,8 +3614,8 @@ function PlanTab({ athlete: currentAthlete, athletes, setActiveAthleteId, produc
                     }
                   }
                 }
-                if (bonkPt) nutritionAlerts.push({ type: "danger", msg: `Projected glycogen depletion (bonk risk) at ${minsToHHMM(bonkPt.time)}. Add carbs.` });
-                else if (warnPt) nutritionAlerts.push({ type: "warn", msg: `Glycogen drops below 30% at ${minsToHHMM(warnPt.time)}. Consider adding carbs.` });
+                if (bonkPt) nutritionAlerts.push({ type: "danger", msg: `Modeled glycogen runs critically low in ${ridePhase(bonkPt.time, glyTotalMin)} — consider adding an intake event.` });
+                else if (warnPt) nutritionAlerts.push({ type: "warn", msg: `Modeled glycogen drops below 30% in ${ridePhase(warnPt.time, glyTotalMin)} — consider adding an intake event.` });
                 if (overLimitPt) nutritionAlerts.push({ type: "warn", msg: `Gut backlog: intake exceeds gut capacity at ${minsToHHMM(overLimitPt.time)} — consider spacing intake further apart.` });
                 if (gutBacklogSustainedPt) nutritionAlerts.push({ type: "warn", msg: `Gut backlog sustained: gut pool >50g for 10+ minutes starting at ${minsToHHMM(gutBacklogSustainedPt.time)}. Body is processing fuel slower than intake.` });
               }
@@ -4275,16 +4303,18 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
       if (lastThirdActual < selectedPlan.pacingPlan.normalizedPower * 0.9) alerts.push({ type: "warn", msg: "Significant power drop in final third — possible fade or under-fueling." });
     }
     const bonkPt = fitOverlay.find(d => d.reservePct < 10);
-    if (bonkPt) alerts.push({ type: "danger", msg: `Glycogen depletion likely around ${minsToHHMM(bonkPt.time)}.` });
+    const glyTotalMin = fitOverlay[fitOverlay.length - 1]?.time ?? fitData?.durationMin ?? 0;
+    if (bonkPt) alerts.push({ type: "danger", msg: `Modeled glycogen runs critically low in ${ridePhase(bonkPt.time, glyTotalMin)}.` });
     // W'bal alerts on actual ride
     if (actualWbalRaw) {
       const { minWbalPct, minWbalTime, wPrime } = actualWbalRaw;
       const depletedPt = actualWbal.find(d => d.wbalPct === 0);
       const critPt     = actualWbal.find(d => d.wbalPct <= 20);
       const warnPt     = actualWbal.find(d => d.wbalPct <= 40);
-      if (depletedPt) alerts.push({ type: "danger", msg: `W' fully depleted at ${minsToHHMM(depletedPt.time)} — this explains any blowup or severe fade.` });
-      else if (critPt) alerts.push({ type: "danger", msg: `W' dropped to critical level (${critPt.wbalPct}%) at ${minsToHHMM(critPt.time)}.` });
-      else if (warnPt) alerts.push({ type: "warn", msg: `W' dropped below 40% at ${minsToHHMM(warnPt.time)} (min: ${Math.round(actualWbalRaw.minWbal/1000*10)/10}kJ).` });
+      const wbalTotalMin = actualWbal[actualWbal.length - 1]?.time ?? fitData?.durationMin ?? 0;
+      if (depletedPt) alerts.push({ type: "danger", msg: `Reconstructed W'bal fully depletes in ${ridePhase(depletedPt.time, wbalTotalMin)} — consistent with a late blow-up or severe fade.` });
+      else if (critPt) alerts.push({ type: "danger", msg: `Reconstructed W'bal reaches a critical level (~${critPt.wbalPct}%) in ${ridePhase(critPt.time, wbalTotalMin)}.` });
+      else if (warnPt) alerts.push({ type: "warn", msg: `Reconstructed W'bal dips below 40% in ${ridePhase(warnPt.time, wbalTotalMin)} (modeled low ≈ ${Math.round(actualWbalRaw.minWbal/1000*10)/10} kJ).` });
     }
   }
 
@@ -4942,7 +4972,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
         };
         const hrColors = hrThirds.map(hrZoneColor);
 
-        // Cardiac drift: HR change T1→T3 with power context
+        // Cardiac drift: HR change first-third → last-third with power context
         const hrDrift   = hrThirds[2] - hrThirds[0];
         const pwrChange = pwrThirds[2] - pwrThirds[0];
 
@@ -5026,13 +5056,13 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
                 narrative = `HR and power tracked closely across all three thirds (${Math.abs(decoupling)}% decoupling). Aerobic system was well-matched to the effort — good pacing control.`;
                 color = "#00D4FF";
               } else if (decoupling > 3 && pwrDropPct < -5) {
-                narrative = `Power dropped ${Math.abs(pwrDropPct)}% from T1 to T3, but HR only dropped ${Math.abs(hrDropPct)}% — HR stayed elevated relative to output. Classic fatigue signature: the engine was working harder to produce less.`;
+                narrative = `Power dropped ${Math.abs(pwrDropPct)}% from the first third to the last third, but HR only dropped ${Math.abs(hrDropPct)}% — HR stayed elevated relative to output. Classic fatigue signature: the engine was working harder to produce less.`;
                 color = "#FF3347";
               } else if (decoupling > 3 && pwrDropPct >= -5) {
                 narrative = `Power held relatively steady (${pwrDropPct > 0 ? "+" : ""}${pwrDropPct}%) but HR climbed ${hrDropPct > 0 ? "+" : ""}${hrDropPct}% — textbook cardiac drift. Likely caused by heat, dehydration, or cumulative fatigue late in the race.`;
                 color = "#FFB800";
               } else if (decoupling < -3) {
-                narrative = `HR fell ${Math.abs(hrDropPct)}% while power dropped ${Math.abs(pwrDropPct)}% — HR dropped proportionally more than power. Could indicate favorable conditions in T3 (tailwind, descent) or a conservative finish.`;
+                narrative = `HR fell ${Math.abs(hrDropPct)}% while power dropped ${Math.abs(pwrDropPct)}% — HR dropped proportionally more than power. Could indicate favorable conditions in the last third (tailwind, descent) or a conservative finish.`;
                 color = "#00FF8C";
               } else {
                 narrative = `Mixed HR response across thirds. Review the power chart for terrain context.`;
@@ -5325,18 +5355,18 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
                       // Find which route-third this second-index belongs to.
                       for (let t = 0; t < 3; t++) {
                         if (thirdsByRouteDistance[t].includes(secIdx)) {
-                          return t === 0 ? "T1 (first third)"
-                               : t === 1 ? "T2 (second third)"
-                               : "T3 (final third)";
+                          return t === 0 ? "the first third"
+                               : t === 1 ? "the second third"
+                               : "the last third";
                         }
                       }
-                      return "(off-route)";
+                      return "an off-route section";
                     }
                     const t1EndSecs = Math.floor(totalSecs / 3);
                     const t2EndSecs = Math.floor(2 * totalSecs / 3);
-                    return secIdx <= t1EndSecs ? "T1 (first third)"
-                         : secIdx <= t2EndSecs ? "T2 (second third)"
-                         : "T3 (final third)";
+                    return secIdx <= t1EndSecs ? "the first third"
+                         : secIdx <= t2EndSecs ? "the second third"
+                         : "the last third";
                   };
                   const peakThird = thirdLabelFor(peakBurnTime);
                   const minThird  = thirdLabelFor(minWbalTime);
@@ -5366,7 +5396,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
                       text: `Your anaerobic reserve dropped to ${minWbalPct}% (${minKjFmt} kJ) at ${minTimeFmt} — below the 20% danger threshold where forced power reduction typically occurs. The largest single-second burn (${peakKjFmt} kJ/s) happened in ${peakThird}. At this level of depletion your body has little choice but to slow down regardless of motivation. If you experienced a sharp power drop late in the race, this is the physiological explanation.`,
                       color: "#FF3347"
                     };
-                    if (minWbalPct < 40 && peakThird.startsWith("T1")) return {
+                    if (minWbalPct < 40 && peakThird === "the first third") return {
                       text: `W' dropped to ${minWbalPct}% (${minKjFmt} kJ remaining from ${wPrimeKj} kJ). The largest burn occurred early — in ${peakThird} at ${peakTimeFmt}. Early match-burning is a common pattern in races with aggressive starts or punchy opening climbs. The body can recover W' at sub-threshold effort, but if power stayed elevated those early draws compound into late-race fatigue. Cross-reference with Threshold Exposure above.`,
                       color: "#FFB800"
                     };
@@ -5374,7 +5404,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
                       text: `W' dropped to ${minWbalPct}% — a draw of ${wDrawnPct}% of total anaerobic budget. The minimum occurred in ${minThird} at ${minTimeFmt}, with peak burn in ${peakThird}. At this depletion level you were working in borrowed territory. Check whether this timing aligns with a climb or surge in the power chart.`,
                       color: "#FFB800"
                     };
-                    if (peakThird.startsWith("T1")) return {
+                    if (peakThird === "the first third") return {
                       text: `W' was well managed overall, dropping to ${minWbalPct}% at minimum. The largest burn occurred early in ${peakThird} — likely a race start surge or opening climb — but you recovered effectively. Good match management: spend hard when needed, recover between efforts.`,
                       color: "#00FF8C"
                     };
@@ -5457,8 +5487,8 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
                                   );
                                 }} />
                                 {/* Third dividers */}
-                                <ReferenceLine yAxisId="pct" x={t1EndMin} stroke={T.border} strokeDasharray="3 3" label={{ value: "T2", fill: T.textDim, fontSize: 8 }} />
-                                <ReferenceLine yAxisId="pct" x={t2EndMin} stroke={T.border} strokeDasharray="3 3" label={{ value: "T3", fill: T.textDim, fontSize: 8 }} />
+                                <ReferenceLine yAxisId="pct" x={t1EndMin} stroke={T.border} strokeDasharray="3 3" label={{ value: "2nd third", fill: T.textDim, fontSize: 8 }} />
+                                <ReferenceLine yAxisId="pct" x={t2EndMin} stroke={T.border} strokeDasharray="3 3" label={{ value: "Last third", fill: T.textDim, fontSize: 8 }} />
                                 {/* Warn 40% */}
                                 <ReferenceLine yAxisId="pct" y={40} stroke="#FFB800" strokeDasharray="4 3" strokeWidth={1}
                                   label={{ value: "Warn", fill: "#FFB800", fontSize: 9, position: "insideTopRight" }} />
@@ -5479,6 +5509,9 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
                           );
                         })()}
                       </div>
+
+                      {/* Modeled-estimate caption (generalized B-22) — ANALYZE W'bal (separate render path from PLAN's WbalChart, per Decision Log) */}
+                      <ModeledEstimateCaption model="wbal" />
 
                       {/* Legend */}
                       <div style={{ display: "flex", gap: 16, marginBottom: 12, fontSize: 10, color: T.textMuted, flexWrap: "wrap" }}>
@@ -5573,7 +5606,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
               ).filter(p => p > 0);
               const globalMaxP = Math.max(...allPowers, 1);
 
-              const THIRD_LABELS = ["T1", "T2", "T3"];
+              const THIRD_LABELS = ["First Third", "Second Third", "Last Third"];
 
               return (
                 <div style={{ marginTop: 0 }}>
@@ -6023,6 +6056,7 @@ function AnalyzeTab({ athlete, products, races, setRaces, imperial, selectedRace
               <BurnRateChart overlayData={fitOverlay} durationMin={fitData?.durationMin} preRaceMealG={fuelingMealCarbsG(analyzePreRaceFueling, athlete.weight)} maxIntakeGPerHr={athlete.maxCarbIntakeGPerHr ?? 90} />
               <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4, marginTop: 12, fontFamily: "Barlow Condensed", letterSpacing: "0.08em", textTransform: "uppercase" }}>Glycogen Reserve</div>
               <GlycogenChart overlayData={fitOverlay} athlete={athlete} />
+              <ModeledEstimateCaption model="glycogen" />
 
               {selectedPlan && (
                 <div style={{ marginTop: 12, padding: "10px 14px", background: T.surface2, borderRadius: 4, fontSize: 12 }}>
